@@ -1,54 +1,53 @@
-- name: Utwórz Maszynę Wirtualną w OpenShift Virt
+- name: Create VM with DataVolume (HTTP Source)
   hosts: localhost
-  connection: local
   gather_facts: false
+  collections:
+    - kubevirt.virtualization
 
-  # Zmienne domyślne, jeśli nie podasz ich w Template
   vars:
-    vm_name: "test-vm-01"
+    vm_name: "auto-vm-01"
     vm_namespace: "default"
-    vm_image: "quay.io/kubevirt/cirros-container-disk-demo:latest"
-    vm_memory: "1Gi"
-    vm_cpu: "1"
+    image_url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
 
   tasks:
-    - name: Wyświetl parametry
-      debug:
-        msg: "Tworzę VM {{ vm_name }} w namespace {{ vm_namespace }}"
-
-    - name: Utwórz definicję VirtualMachine
-      kubernetes.core.k8s:
+    - name: Create VM with DataVolume
+      kubevirt.virtualization.openshift_virtualization_vm:
         state: present
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
         definition:
           apiVersion: kubevirt.io/v1
           kind: VirtualMachine
           metadata:
             name: "{{ vm_name }}"
-            namespace: "{{ vm_namespace }}"
-            labels:
-              app: "{{ vm_name }}"
-              created_by: ansible
           spec:
-            running: false  # Maszyna stworzona, ale wyłączona
+            running: false
             template:
-              metadata:
-                labels:
-                  kubevirt.io/domain: "{{ vm_name }}"
               spec:
                 domain:
-                  cpu:
-                    cores: "{{ vm_cpu }}"
                   devices:
                     disks:
                       - disk:
                           bus: virtio
-                        name: root-disk
-                  machine:
-                    type: q35
+                        name: rootdisk
                   resources:
                     requests:
-                      memory: "{{ vm_memory }}"
+                      memory: 2Gi
+                      cpu: "1"
                 volumes:
-                  - containerDisk:
-                      image: "{{ vm_image }}"
-                    name: root-disk
+                  - dataVolume:
+                      name: "{{ vm_name }}-dv"
+                    name: rootdisk
+            dataVolumeTemplates:
+              - metadata:
+                  name: "{{ vm_name }}-dv"
+                spec:
+                  source:
+                    http:
+                      url: "{{ image_url }}"
+                  pvc:
+                    accessModes:
+                      - ReadWriteOnce
+                    resources:
+                      requests:
+                        storage: 10Gi

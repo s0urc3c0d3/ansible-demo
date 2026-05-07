@@ -1,0 +1,9 @@
+- name: List VMS on OpenShift Virtualization
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+  - name: Get a list of all VirtualMachines
+    redhat.openshift_virtualization.kubevirt_vm_info:
+      namespace: default
+      api_key: "{{ api_key }}"

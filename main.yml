@@ -21,54 +21,41 @@
         state: present
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
-        definition:
-          apiVersion: kubevirt.io/v1
-          kind: VirtualMachine
-          metadata:
-            name: "{{ vm_name }}"
-            namespace: "{{ vm_namespace }}"
-          spec:
-            # Ustaw na 'true', jeśli chcesz, aby VM uruchomiła się od razu po utworzeniu
-            running: false
-            template:
-              metadata:
-                labels:
-                  kubevirt.io/size: small
+        spec:
+          running: false
+          template:
+            metadata:
+              labels:
+                kubevirt.io/size: small
+            spec:
+              domain:
+                cpu:
+                  cores: "{{ vm_cpu }}"
+                memory:
+                  guest: "{{ vm_memory }}"
+                devices:
+                  interfaces:
+                    - name: default
+                      masquerade: {}
+                  disks:
+                    - name: rootdisk
+                      disk:
+                        bus: virtio
+              volumes:
+                - name: rootdisk
+                  dataVolume:
+                    name: "{{ vm_name }}-dv"
+          # --- Szablon DataVolume jako osobny parametr ---
+          data_volume_templates:
+            - metadata:
+                name: "{{ vm_name }}-dv"
               spec:
-                domain:
-                  cpu:
-                    cores: "{{ vm_cpu }}"
-                  memory:
-                    guest: "{{ vm_memory }}"
-                  devices:
-                    # Definicja interfejsu sieciowego (standardowy masquerade)
-                    interfaces:
-                      - name: default
-                        masquerade: {}
-                    # Definicja dysku
-                    disks:
-                      - name: rootdisk
-                        disk:
-                          bus: virtio
-                # Definicja wolumenów
-                volumes:
-                  - name: rootdisk
-                    # Użycie DataVolume jako źródła dysku
-                    dataVolume:
-                      name: "{{ vm_name }}-dv"
-            # Szablon do automatycznego utworzenia DataVolume
-            dataVolumeTemplates:
-              - metadata:
-                  name: "{{ vm_name }}-dv"
-                spec:
-                  # Źródło obrazu - HTTP
-                  source:
-                    http:
-                      url: "{{ image_url }}"
-                  # Definicja PVC, który zostanie utworzony przez DataVolume
-                  pvc:
-                    accessModes:
-                      - ReadWriteOnce
-                    resources:
-                      requests:
-                        storage: "{{ pvc_size }}"
+                source:
+                  http:
+                    url: "{{ image_url }}"
+                pvc:
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: "{{ pvc_size }}"

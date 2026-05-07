@@ -1,5 +1,54 @@
-- hosts: all
+- name: Utwórz Maszynę Wirtualną w OpenShift Virt
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  # Zmienne domyślne, jeśli nie podasz ich w Template
+  vars:
+    vm_name: "test-vm-01"
+    vm_namespace: "default"
+    vm_image: "quay.io/kubevirt/cirros-container-disk-demo:latest"
+    vm_memory: "1Gi"
+    vm_cpu: "1"
+
   tasks:
-  - name: test
-    debug:
-      msg: "test"
+    - name: Wyświetl parametry
+      debug:
+        msg: "Tworzę VM {{ vm_name }} w namespace {{ vm_namespace }}"
+
+    - name: Utwórz definicję VirtualMachine
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: "{{ vm_name }}"
+            namespace: "{{ vm_namespace }}"
+            labels:
+              app: "{{ vm_name }}"
+              created_by: ansible
+          spec:
+            running: false  # Maszyna stworzona, ale wyłączona
+            template:
+              metadata:
+                labels:
+                  kubevirt.io/domain: "{{ vm_name }}"
+              spec:
+                domain:
+                  cpu:
+                    cores: "{{ vm_cpu }}"
+                  devices:
+                    disks:
+                      - disk:
+                          bus: virtio
+                        name: root-disk
+                  machine:
+                    type: q35
+                  resources:
+                    requests:
+                      memory: "{{ vm_memory }}"
+                volumes:
+                  - containerDisk:
+                      image: "{{ vm_image }}"
+                    name: root-disk

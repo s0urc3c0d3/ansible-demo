@@ -1,17 +1,23 @@
-- name: Create VM with DataVolume (HTTP Source)
+- name: Create VM from URL image in OpenShift Virtualization
   hosts: localhost
   gather_facts: false
   collections:
-    - kubevirt.virtualization
+    - redhat.openshift_virtualization
 
   vars:
-    vm_name: "auto-vm-01"
-    vm_namespace: "default"
+    # --- Zmienne konfiguracyjne ---
+    vm_name: "test-vm-from-url"
+    vm_namespace: "default"  # Upewnij się, że ten projekt istnieje!
+    vm_memory: "2Gi"
+    vm_cpu: "2"
+    # URL do obrazu dysku (np. qcow2, raw). Musi być publicznie dostępny dla klastra.
     image_url: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+    # Rozmiar dysku PVC, który zostanie utworzony
+    pvc_size: "15Gi"
 
   tasks:
-    - name: Create VM with DataVolume
-      kubevirt.virtualization.openshift_virtualization_vm:
+    - name: Create VirtualMachine with DataVolume template
+      redhat.openshift_virtualization.kubevirt_vm:
         state: present
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
@@ -20,34 +26,49 @@
           kind: VirtualMachine
           metadata:
             name: "{{ vm_name }}"
+            namespace: "{{ vm_namespace }}"
           spec:
+            # Ustaw na 'true', jeśli chcesz, aby VM uruchomiła się od razu po utworzeniu
             running: false
             template:
+              metadata:
+                labels:
+                  kubevirt.io/size: small
               spec:
                 domain:
+                  cpu:
+                    cores: "{{ vm_cpu }}"
+                  memory:
+                    guest: "{{ vm_memory }}"
                   devices:
+                    # Definicja interfejsu sieciowego (standardowy masquerade)
+                    interfaces:
+                      - name: default
+                        masquerade: {}
+                    # Definicja dysku
                     disks:
-                      - disk:
+                      - name: rootdisk
+                        disk:
                           bus: virtio
-                        name: rootdisk
-                  resources:
-                    requests:
-                      memory: 2Gi
-                      cpu: "1"
+                # Definicja wolumenów
                 volumes:
-                  - dataVolume:
+                  - name: rootdisk
+                    # Użycie DataVolume jako źródła dysku
+                    dataVolume:
                       name: "{{ vm_name }}-dv"
-                    name: rootdisk
+            # Szablon do automatycznego utworzenia DataVolume
             dataVolumeTemplates:
               - metadata:
                   name: "{{ vm_name }}-dv"
                 spec:
+                  # Źródło obrazu - HTTP
                   source:
                     http:
                       url: "{{ image_url }}"
+                  # Definicja PVC, który zostanie utworzony przez DataVolume
                   pvc:
                     accessModes:
                       - ReadWriteOnce
                     resources:
                       requests:
-                        storage: 10Gi
+                        storage: "{{ pvc_size }}"

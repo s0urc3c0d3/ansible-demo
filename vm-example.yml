@@ -1,0 +1,148 @@
+changed: false
+resources:
+  - apiVersion: kubevirt.io/v1
+    kind: VirtualMachine
+    metadata:
+      annotations:
+        kubevirt.io/latest-observed-api-version: v1
+        kubevirt.io/storage-observed-api-version: v1
+        vm.kubevirt.io/flavor: small
+        vm.kubevirt.io/os: rhel8
+        vm.kubevirt.io/workload: server
+      creationTimestamp: '2026-05-07T10:00:39Z'
+      finalizers:
+        - kubevirt.io/virtualMachineControllerFinalize
+      generation: 1
+      labels:
+        app: my-test-vm
+        kubevirt.io/dynamic-credentials-support: 'true'
+        vm.kubevirt.io/template: rhel8-server-small
+        vm.kubevirt.io/template.namespace: openshift
+        vm.kubevirt.io/template.revision: '1'
+        vm.kubevirt.io/template.version: v1
+      name: my-test-vm
+      namespace: default
+      resourceVersion: '30811654'
+      uid: 389b6621-f597-4978-92a6-6de8d53c781a
+    spec:
+      dataVolumeTemplates:
+        - kind: DataVolume
+          metadata:
+            creationTimestamp: null
+            name: my-test-vm
+          spec:
+            sourceRef:
+              kind: DataSource
+              name: rhel8
+              namespace: openshift-virtualization-os-images
+            storage:
+              resources:
+                requests:
+                  storage: 10Gi
+      running: true
+      template:
+        metadata:
+          annotations:
+            kubevirt.io/pci-topology-version: v3
+            vm.kubevirt.io/flavor: small
+            vm.kubevirt.io/os: rhel8
+            vm.kubevirt.io/workload: server
+          creationTimestamp: null
+          labels:
+            app: my-test-vm
+            kubevirt.io/dynamic-credentials-support: 'true'
+            vm.kubevirt.io/template: rhel8-server-small
+            vm.kubevirt.io/template.namespace: openshift
+            vm.kubevirt.io/template.revision: '1'
+            vm.kubevirt.io/template.version: v1
+        spec:
+          architecture: amd64
+          domain:
+            cpu:
+              cores: 2
+              sockets: 1
+              threads: 1
+            devices:
+              disks:
+                - disk:
+                    bus: virtio
+                  name: rootdisk
+                - disk:
+                    bus: virtio
+                  name: cloudinitdisk
+              interfaces:
+                - macAddress: 02:38:67:9c:8e:87
+                  masquerade: {}
+                  model: virtio
+                  name: default-net
+            firmware:
+              serial: 92f236eb-da96-488c-9a96-a756da6f8b7b
+              uuid: d59c9dab-3c2e-428f-a24e-4ad131402f43
+            machine:
+              type: pc-q35-rhel9.6.0
+            memory:
+              guest: 2Gi
+            resources: {}
+          networks:
+            - name: default-net
+              pod: {}
+          terminationGracePeriodSeconds: 180
+          volumes:
+            - dataVolume:
+                name: my-test-vm
+              name: rootdisk
+            - cloudInitNoCloud:
+                userData: |
+                  #cloud-config
+                  user: cloud-user
+                  password: redhat
+                  chpasswd: { expire: False }
+              name: cloudinitdisk
+    status:
+      conditions:
+        - lastProbeTime: '2026-05-07T10:00:39Z'
+          lastTransitionTime: '2026-05-07T10:00:39Z'
+          message: VMI does not exist
+          reason: VMINotExists
+          status: 'False'
+          type: Ready
+      printableStatus: Provisioning
+      volumeSnapshotStatuses:
+        - enabled: false
+          name: rootdisk
+          reason: PVC not found
+        - enabled: false
+          name: cloudinitdisk
+          reason: Snapshot is not supported for this volumeSource type [cloudinitdisk]
+api_found: true
+invocation:
+  module_args:
+    namespace: default
+    api_key: VALUE_SPECIFIED_IN_NO_LOG_PARAMETER
+    hidden_fields:
+      - metadata.annotations[kubemacpool.io/transaction-timestamp]
+      - metadata.managedFields
+    api_version: kubevirt.io/v1
+    label_selectors: []
+    field_selectors: []
+    wait_sleep: 5
+    wait_timeout: 120
+    running: null
+    name: null
+    wait: null
+    kubeconfig: null
+    context: null
+    host: null
+    username: null
+    password: null
+    validate_certs: null
+    ca_cert: null
+    client_cert: null
+    client_key: null
+    proxy: null
+    no_proxy: null
+    proxy_headers: null
+    persist_config: null
+    impersonate_user: null
+    impersonate_groups: null
+_ansible_no_log: false

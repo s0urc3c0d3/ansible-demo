@@ -14,7 +14,7 @@
     cpu_threads: 1
 
     # Templates and images
-    os_images_template: rhel8
+    os_images_template: rhel9
     os_images_project: openshift-virtualization-os-images
     os_images_flavor: small
     os_images_workload: server
@@ -61,10 +61,13 @@
             metadata:
               name: "{{ vm_name }}"
             spec:
-              sourceRef:
-                kind: 'DataSource'
-                name: "{{ os_images_template }}"
-                namespace: "{{ os_images_project }}"
+              #sourceRef:
+              #  kind: 'DataSource'
+              #  name: "{{ os_images_template }}"
+              #  namespace: "{{ os_images_project }}"
+              source:
+                http:
+                  url: https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2
               storage:
                 resources:
                   requests:

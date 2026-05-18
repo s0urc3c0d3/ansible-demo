@@ -1,26 +1,18 @@
 - name: Create a VM on OpenShift Virtualization
-  hosts: localhost
-  connection: local
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
   gather_facts: false
 
   vars:
     # VM details
-    vm_name: my-test-vm
-    vm_project: default
-    storage_size: 30Gi
-    memory_size: 2Gi
-    cpu_cores: 2
+    #vm_name: my-test-vm
+    #vm_project: default
+    #storage_size: 30Gi
+    #memory_size: 2Gi
+    #cpu_cores: 2
     cpu_sockets: 1
     cpu_threads: 1
-
-    # Templates and images
-    os_images_template: rhel9
-    os_images_project: openshift-virtualization-os-images
-    os_images_flavor: small
-    os_images_workload: server
-    os_images_template_namespace: openshift
-    os_images_template_revision: "1"
-    os_images_template_version: v1
 
     # Network
     network_interface1_name: default-net
@@ -42,19 +34,10 @@
         running: true
         validate_certs: "{{ validate_certs }}"
         state: present
-
-        annotations:
-          vm.kubevirt.io/flavor: "{{ os_images_flavor }}"
-          vm.kubevirt.io/os: "{{ os_images_template }}"
-          vm.kubevirt.io/workload: "{{ os_images_workload }}"
-
+        
         labels:
           app: "{{ vm_name }}"
           kubevirt.io/dynamic-credentials-support: 'true'
-          vm.kubevirt.io/template: "{{ os_images_template }}-{{ os_images_workload }}-{{ os_images_flavor }}"
-          vm.kubevirt.io/template.namespace: "{{ os_images_template_namespace }}"
-          vm.kubevirt.io/template.revision: "{{ os_images_template_revision }}"
-          vm.kubevirt.io/template.version: "{{ os_images_template_version }}"
 
         data_volume_templates:
           - kind: 'DataVolume'
@@ -67,7 +50,7 @@
               #  namespace: "{{ os_images_project }}"
               source:
                 http:
-                  url: https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2
+                  url: "{{ url }}"
               storage:
                 resources:
                   requests:
@@ -83,7 +66,7 @@
 #                    secretName: "{{ ssh_key_secret }}"
           domain:
             cpu:
-              cores: "{{ cpu_cores }}"
+              cores: "{{cpu_cores }}"
               sockets: "{{ cpu_sockets }}"
               threads: "{{ cpu_threads }}"
             devices:

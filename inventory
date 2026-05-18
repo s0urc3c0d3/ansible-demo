@@ -1,0 +1,42 @@
+local ansible_connection=local
+
+[ldap]
+freeipa ansible_host=192.168.122.100 
+
+[openshift]
+service ansible_host=192.168.122.10
+
+[storage]
+ceph ansible_host=192.168.123.7
+
+[storage-virt]
+ceph-virt ansible_host=192.168.123.20
+
+[sso]
+keycloak ansible_host=192.168.123.6
+
+[ldap:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_user=root
+ansible_password='Admin123!'
+
+[storage:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_user=root
+ansible_password='Admin123!'
+
+[storage-virt:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_user=root
+ansible_password='Admin123!'
+
+[openshift:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_user=root
+ansible_password='Admin123!'
+
+[sso:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_user=root
+ansible_password='Admin123!'
+

@@ -9,7 +9,6 @@
   tasks:
   - name: Get a list of all VirtualMachines
     redhat.openshift_virtualization.kubevirt_vmi_info:
-      namespace: "{{ vm_project }}"
       api_key: "{{ api_key }}"
     register: output
 

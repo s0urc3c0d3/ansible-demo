@@ -1,0 +1,52 @@
+- hosts: openshift
+  #hosts: localhost
+  #connection: local
+  gather_facts: false
+
+  tasks:
+  - name: Create a empty datavolume 
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        metadata:
+          annotations:
+            cdi.kubevirt.io/storage.usePopulator: "false"
+          name: "{{ volume_name }}"
+          namespace: "{{ volume_project }}"
+        spec:
+          source:
+            blank: {}
+          storage:
+            accessModes:
+            - ReadWriteMany
+            resources:
+              requests:
+                storage: "{{ size }}"
+            volumeMode: Block
+    when: type == "empty"
+
+  - name: Create a empty datavolume 
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        metadata:
+          annotations:
+            cdi.kubevirt.io/storage.usePopulator: "false"
+          name: "{{ volume_name }}"
+          namespace: "{{ volume_project }}"
+        spec:
+          source:
+            http:
+              url: "{{ url }}"
+          storage:
+            accessModes:
+            - ReadWriteMany
+            resources:
+              requests:
+                storage: "{{ size }}"
+            volumeMode: Block
+    when: type == "url"

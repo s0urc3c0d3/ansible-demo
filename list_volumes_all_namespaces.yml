@@ -1,0 +1,28 @@
+- name: List DataVolume on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+  vars:
+    vm_project: default
+
+  tasks:
+
+  - name: List DataVolumes
+    k8s_info:
+      kind: DataVolume
+      api_version: "cdi.kubevirt.io/v1beta1"
+    register: output
+
+  - name: return list of all DataVolumes
+    set_fact:
+      final_dv_list: "{{ final_dv_list | default([]) + [item_data] }}"
+    vars:
+      item_data:
+        name: "{{ item.metadata.name  }}"
+        size: "{{ item.spec.storage.resources.requests.storage }}"
+    loop: "{{ output.resources }}"
+
+  - name: return list of all VirtualMachines
+    debug:
+      var: final_dv_list

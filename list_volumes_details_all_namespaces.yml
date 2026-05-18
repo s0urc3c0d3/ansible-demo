@@ -1,0 +1,12 @@
+- name: List DataVolume on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+
+  tasks:
+
+  - name: List DataVolumes
+    k8s_info:
+      kind: DataVolume
+      api_version: "cdi.kubevirt.io/v1beta1"

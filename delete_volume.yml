@@ -1,0 +1,21 @@
+- hosts: openshift
+  #hosts: localhost
+  #connection: local
+  gather_facts: false
+
+  vars:
+    # VM details
+    #vm_name: my-test-vm
+    #vm_project: default
+    validate_certs: false
+
+  tasks:
+  - name: Delete DataVolume
+    kubernetes.core.k8s:
+      state: absent
+      definition:
+        apiVersion: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        metadata:
+          name: "{{ volume_name }}"
+          namespace: "{{ volume_project }}"

@@ -1,6 +1,6 @@
-- hosts: openshift
-  #hosts: localhost
-  #connection: local
+- connection: local
+  hosts: openshift
+  hosts: localhost
   gather_facts: false
 
   vars:

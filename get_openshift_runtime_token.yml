@@ -9,6 +9,8 @@
     runtime_service_account: "{{ console_service_account | default('enicloud', true) }}"
     effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
     effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    no_log: "{{ no_log | default(true) | bool }}"
+
 
   tasks:
     - name: Validate OpenShift runtime token inputs

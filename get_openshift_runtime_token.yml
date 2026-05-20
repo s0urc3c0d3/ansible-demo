@@ -5,12 +5,10 @@
 
   vars:
     validate_certs: false
-    token_duration_seconds: 300
+    token_duration_seconds: 600
     runtime_service_account: "{{ console_service_account | default('enicloud', true) }}"
     effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
     effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
-    no_log: "{{ no_log | default(true) | bool }}"
-
 
   tasks:
     - name: Validate OpenShift runtime token inputs
@@ -54,17 +52,20 @@
           Accept: application/json
           Content-Type: application/json
         body_format: json
-        body:
-          apiVersion: authentication.k8s.io/v1
-          kind: TokenRequest
-          spec:
-            expirationSeconds: "{{ token_duration_seconds | int }}"
+        body: |
+          {
+            "apiVersion": "authentication.k8s.io/v1",
+            "kind": "TokenRequest",
+            "spec": {
+              "expirationSeconds": {{ token_duration_seconds | int }}
+            }
+          }
         validate_certs: "{{ validate_certs }}"
         return_content: true
         status_code: 201
       register: token_request
       changed_when: false
-      no_log: true
+      no_log: "{{ no_log | default(false) | bool }}"
 
     - name: Expose EniCloud OpenShift runtime token result
       ansible.builtin.set_stats:
@@ -92,4 +93,4 @@
             status: "{{ (vmi_info.resources | default([]) | first | default({})).status.phase | default('Running') }}"
             primary_ip: "{{ ((vmi_info.resources | default([]) | first | default({})).status.interfaces | default([]) | first | default({})).ipAddress | default('') }}"
             resources: "{{ vmi_info.resources | default([]) }}"
-      no_log: true
+      no_log: "{{ no_log | default(false) | bool }}"

@@ -1,0 +1,93 @@
+- name: Get short-lived OpenShift runtime token for EniCloud
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    token_duration_seconds: 300
+    runtime_service_account: "{{ console_service_account | default('enicloud', true) }}"
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+
+  tasks:
+    - name: Validate OpenShift runtime token inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host is defined
+          - effective_host | length > 0
+          - effective_api_key is defined
+          - effective_api_key | length > 0
+          - vm_name is defined
+          - vm_name | length > 0
+          - vm_project is defined
+          - vm_project | length > 0
+          - runtime_service_account is defined
+          - runtime_service_account | length > 0
+        fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, vm_name, vm_project, runtime_service_account"
+
+    - name: Read VM instance details
+      redhat.openshift_virtualization.kubevirt_vmi_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_project }}"
+      register: vmi_info
+      failed_when: false
+      changed_when: false
+
+    - name: Validate running VM instance
+      ansible.builtin.assert:
+        that:
+          - (vmi_info.resources | default([]) | length) > 0
+        fail_msg: "VirtualMachineInstance {{ vm_project }}/{{ vm_name }} was not found or is not running"
+
+    - name: Request short-lived service account token
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/api/v1/namespaces/{{ vm_project }}/serviceaccounts/{{ runtime_service_account }}/token"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/json
+        body_format: json
+        body:
+          apiVersion: authentication.k8s.io/v1
+          kind: TokenRequest
+          spec:
+            expirationSeconds: "{{ token_duration_seconds | int }}"
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 201
+      register: token_request
+      changed_when: false
+      no_log: true
+
+    - name: Expose EniCloud OpenShift runtime token result
+      ansible.builtin.set_stats:
+        data:
+          api_host: "{{ effective_host }}"
+          namespace: "{{ vm_project }}"
+          vmi_name: "{{ vm_name }}"
+          token: "{{ token_request.json.status.token }}"
+          expires_at: "{{ token_request.json.status.expirationTimestamp | default('') }}"
+          verify_tls: "{{ validate_certs }}"
+          eni_result:
+            resource_id: "{{ vm_name }}"
+            vm_name: "{{ vm_name }}"
+            vm_project: "{{ vm_project }}"
+            api_host: "{{ effective_host }}"
+            namespace: "{{ vm_project }}"
+            vmi_name: "{{ vm_name }}"
+            token: "{{ token_request.json.status.token }}"
+            expires_at: "{{ token_request.json.status.expirationTimestamp | default('') }}"
+            verify_tls: "{{ validate_certs }}"
+            runtime_service_account: "{{ runtime_service_account }}"
+            supported_uses:
+              - console_vnc
+              - metrics
+            status: "{{ (vmi_info.resources | default([]) | first | default({})).status.phase | default('Running') }}"
+            primary_ip: "{{ ((vmi_info.resources | default([]) | first | default({})).status.interfaces | default([]) | first | default({})).ipAddress | default('') }}"
+            resources: "{{ vmi_info.resources | default([]) }}"
+      no_log: true

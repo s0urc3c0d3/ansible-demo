@@ -1,7 +1,7 @@
 - name: Create a snapshot on OpenShift Virtualization
-  #hosts: localhost
-  hosts: openshift
-  #connection: local
+  hosts: localhost
+  #hosts: openshift
+  connection: local
   gather_facts: false
 
   vars:
@@ -22,11 +22,11 @@
         apiVersion: snapshot.kubevirt.io/v1beta1
         kind: VirtualMachineRestore
         metadata:
-          name: "{{ snapshot_name }}"
+          name: "{{ snapshot_restore_name }}"
           namespace: "{{ vm_project }}"
         spec:
           target:
             apiGroup: kubevirt.io
             kind: VirtualMachine
             name: "{{ vm_name }}"
-          virtualMachineSnapshotName: "{{ snapshot_restore_name }}"
+          virtualMachineSnapshotName: "{{ snapshot_name }}"

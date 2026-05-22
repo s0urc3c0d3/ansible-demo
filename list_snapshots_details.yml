@@ -1,0 +1,30 @@
+- name: List DataVolume on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+  vars:
+    vm_project: default
+
+  tasks:
+
+  - name: List Snapshots
+    k8s_info:
+      kind: VirtualMachineSnapshot
+      api_version: "snapshot.kubevirt.io/v1beta1"
+      namespace: "{{vm_project}}"
+    register: output
+
+  - name: prepare list of all Snapshots
+    set_fact:
+      final_dv_list: "{{ final_dv_list | default([]) + [item_data] }}"
+    vars:
+      item_data:
+        name: "{{ item.metadata.name  }}"
+        vm_name: "{{ item.spec.source.name }}"
+        phase: "{{ item.status.phase }}"
+    loop: "{{ output.resources }}"
+
+  - name: return list of all Snapshots
+    debug:
+      var: final_dv_list

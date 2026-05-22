@@ -1,0 +1,32 @@
+- name: Create a snapshot on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+
+  vars:
+    # VM details
+    #vm_name: my-test-vm
+    #vm_project: default
+    #snapshot_name: snap1
+    
+    # API access
+    #api_key: "{{ lookup('env', 'OPENSHIFT_API_KEY') }}"
+    validate_certs: false
+
+  tasks:
+  - name: restore snapshot
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: snapshot.kubevirt.io/v1beta1
+        kind: VirtualMachineRestore
+        metadata:
+          name: "{{ snapshot_name }}"
+          namespace: "{{ vm_project }}"
+        spec:
+          target:
+            apiGroup: kubevirt.io
+            kind: VirtualMachine
+            name: "{{ vm_name }}"
+          virtualMachineSnapshotName: "{{ snapshot_restore_name }}"

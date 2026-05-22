@@ -1,0 +1,15 @@
+- name: List DataVolume on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+  vars:
+    vm_project: default
+
+  tasks:
+
+  - name: List Snapshots
+    k8s_info:
+      kind: VirtualMachineSnapshot
+      api_version: "snapshot.kubevirt.io/v1beta1"
+      namespace: "{{vm_project}}"

@@ -1,0 +1,21 @@
+- connection: local
+  hosts: openshift
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # VM details
+    #snapshot_name: my-test-vm
+    #vm_project: default
+    validate_certs: false
+
+  tasks:
+  - name: Delete vmsnapshot
+    kubernetes.core.k8s:
+      state: absent
+      definition:
+        kind: VirtualMachineSnapshot
+        apiVersion: "snapshot.kubevirt.io/v1beta1"
+        metadata:
+          name: "{{ snapshot_name }}"
+          namespace: "{{ vm_project }}"

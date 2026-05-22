@@ -1,0 +1,15 @@
+- name: List snapshots on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+  #vars:
+    #vm_project: default
+
+  tasks:
+
+  - name: List VirtualMachineRestore
+    k8s_info:
+      kind: VirtualMachineRestore
+      api_version: "snapshot.kubevirt.io/v1beta1"
+      namespace: "{{vm_project}}"

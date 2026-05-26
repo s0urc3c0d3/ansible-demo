@@ -1,52 +1,78 @@
-- hosts: openshift
-  #hosts: localhost
-  #connection: local
+---
+- name: Create OpenShift Virtualization DataVolume
+  hosts: openshift
   gather_facts: false
 
-  tasks:
-  - name: Create a empty datavolume 
-    kubernetes.core.k8s:
-      state: present
-      definition:
-        apiVersion: cdi.kubevirt.io/v1beta1
-        kind: DataVolume
-        metadata:
-          annotations:
-            cdi.kubevirt.io/storage.usePopulator: "false"
-          name: "{{ volume_name }}"
-          namespace: "{{ volume_project }}"
-        spec:
-          source:
-            blank: {}
-          storage:
-            accessModes:
-            - ReadWriteMany
-            resources:
-              requests:
-                storage: "{{ size }}"
-            volumeMode: Block
-    when: type == "empty"
+  vars:
+    datavolume_source_type: "{{ type | default('empty', true) }}"
+    datavolume_access_mode: "{{ access_mode | default('ReadWriteOnce', true) }}"
+    datavolume_volume_mode: "{{ volume_mode | default('Block', true) }}"
+    datavolume_storage_class: "{{ storage_class | default('lvms-vg1', true) }}"
 
-  - name: Create a empty datavolume 
-    kubernetes.core.k8s:
-      state: present
-      definition:
-        apiVersion: cdi.kubevirt.io/v1beta1
-        kind: DataVolume
-        metadata:
-          annotations:
-            cdi.kubevirt.io/storage.usePopulator: "false"
-          name: "{{ volume_name }}"
-          namespace: "{{ volume_project }}"
-        spec:
-          source:
-            http:
-              url: "{{ url }}"
-          storage:
-            accessModes:
-            - ReadWriteMany
-            resources:
-              requests:
-                storage: "{{ size }}"
-            volumeMode: Block
-    when: type == "url"
+  tasks:
+    - name: Validate required volume inputs
+      ansible.builtin.assert:
+        that:
+          - volume_name is defined
+          - volume_name | string | length > 0
+          - volume_project is defined
+          - volume_project | string | length > 0
+          - size is defined
+          - size | string | length > 0
+          - datavolume_source_type in ["empty", "url"]
+          - datavolume_access_mode in ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]
+          - datavolume_volume_mode in ["Block", "Filesystem"]
+        fail_msg: "Invalid DataVolume input. Required: volume_name, volume_project, size and supported type/access_mode/volume_mode."
+
+    - name: Validate URL source input
+      ansible.builtin.assert:
+        that:
+          - url is defined
+          - url | string | length > 0
+        fail_msg: "url is required when type=url."
+      when: datavolume_source_type == "url"
+
+    - name: Build blank DataVolume source
+      ansible.builtin.set_fact:
+        datavolume_source:
+          blank: {}
+      when: datavolume_source_type == "empty"
+
+    - name: Build HTTP DataVolume source
+      ansible.builtin.set_fact:
+        datavolume_source:
+          http:
+            url: "{{ url }}"
+      when: datavolume_source_type == "url"
+
+    - name: Create DataVolume
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: cdi.kubevirt.io/v1beta1
+          kind: DataVolume
+          metadata:
+            annotations:
+              cdi.kubevirt.io/storage.usePopulator: "false"
+            name: "{{ volume_name }}"
+            namespace: "{{ volume_project }}"
+          spec:
+            source: "{{ datavolume_source }}"
+            storage:
+              storageClassName: "{{ datavolume_storage_class }}"
+              accessModes:
+                - "{{ datavolume_access_mode }}"
+              resources:
+                requests:
+                  storage: "{{ size }}"
+              volumeMode: "{{ datavolume_volume_mode }}"
+
+    - name: Publish DataVolume output
+      ansible.builtin.set_stats:
+        data:
+          volume_id: "{{ volume_name }}"
+          volume_name: "{{ volume_name }}"
+          volume_project: "{{ volume_project }}"
+          storage_class: "{{ datavolume_storage_class }}"
+          access_mode: "{{ datavolume_access_mode }}"
+          volume_mode: "{{ datavolume_volume_mode }}"

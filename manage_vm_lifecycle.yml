@@ -1,0 +1,144 @@
+---
+- name: Manage OpenShift Virtualization VM lifecycle for EniCloud
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    effective_vm_name: "{{ vm_name | default(resource_id, true) | default(name, true) }}"
+    effective_vm_project: "{{ vm_project | default(project, true) | default(namespace, true) }}"
+    requested_operation: "{{ operation | default(lifecycle_action, true) | default(vm_action, true) | default(power_action, true) | default('', true) }}"
+    lifecycle_operation_aliases:
+      power_on: start
+      on: start
+      power_off: stop
+      off: stop
+      shutdown: stop
+      reboot: restart
+      pause: suspend
+      unpause: resume
+      destroy: delete
+
+  tasks:
+    - name: Resolve lifecycle operation
+      ansible.builtin.set_fact:
+        effective_operation: "{{ lifecycle_operation_aliases.get(requested_operation | string | lower, requested_operation | string | lower) }}"
+
+    - name: Validate lifecycle inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host is defined
+          - effective_host | length > 0
+          - effective_api_key is defined
+          - effective_api_key | length > 0
+          - effective_vm_name is defined
+          - effective_vm_name | length > 0
+          - effective_vm_project is defined
+          - effective_vm_project | length > 0
+          - effective_operation in ["start", "stop", "restart", "suspend", "resume", "delete"]
+        fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, vm_name/resource_id, vm_project, operation/lifecycle_action/vm_action."
+
+    - name: Stop VM before restart
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/apis/kubevirt.io/v1/namespaces/{{ effective_vm_project }}/virtualmachines/{{ effective_vm_name }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/merge-patch+json
+        body_format: json
+        body:
+          spec:
+            running: false
+        validate_certs: "{{ validate_certs }}"
+        status_code: 200
+      when: effective_operation == "restart"
+
+    - name: Start or stop VM
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/apis/kubevirt.io/v1/namespaces/{{ effective_vm_project }}/virtualmachines/{{ effective_vm_name }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/merge-patch+json
+        body_format: json
+        body:
+          spec:
+            running: "{{ effective_operation in ['start', 'restart'] }}"
+        validate_certs: "{{ validate_certs }}"
+        status_code: 200
+      when: effective_operation in ["start", "stop", "restart"]
+
+    - name: Suspend VM instance
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/apis/subresources.kubevirt.io/v1/namespaces/{{ effective_vm_project }}/virtualmachineinstances/{{ effective_vm_name }}/pause"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/json
+        validate_certs: "{{ validate_certs }}"
+        status_code:
+          - 200
+          - 202
+      when: effective_operation == "suspend"
+
+    - name: Resume VM instance
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/apis/subresources.kubevirt.io/v1/namespaces/{{ effective_vm_project }}/virtualmachineinstances/{{ effective_vm_name }}/unpause"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/json
+        validate_certs: "{{ validate_certs }}"
+        status_code:
+          - 200
+          - 202
+      when: effective_operation == "resume"
+
+    - name: Delete VM
+      kubernetes.core.k8s:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        state: absent
+        definition:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: "{{ effective_vm_name }}"
+            namespace: "{{ effective_vm_project }}"
+      when: effective_operation == "delete"
+
+    - name: Read VM instance details after lifecycle operation
+      redhat.openshift_virtualization.kubevirt_vmi_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vmi_info
+      failed_when: false
+      changed_when: false
+      when: effective_operation != "delete"
+
+    - name: Expose EniCloud lifecycle result
+      ansible.builtin.set_stats:
+        data:
+          resource_id: "{{ effective_vm_name }}"
+          vm_name: "{{ effective_vm_name }}"
+          vm_project: "{{ effective_vm_project }}"
+          operation: "{{ effective_operation }}"
+          eni_result:
+            resource_id: "{{ effective_vm_name }}"
+            vm_name: "{{ effective_vm_name }}"
+            vm_project: "{{ effective_vm_project }}"
+            operation: "{{ effective_operation }}"
+            status: "{{ ((vmi_info.resources | default([]) | first | default({})).status.phase | default('deleted')) if effective_operation != 'delete' else 'deleted' }}"
+            primary_ip: "{{ ((vmi_info.resources | default([]) | first | default({})).status.interfaces | default([]) | first | default({})).ipAddress | default('') if effective_operation != 'delete' else '' }}"
+            resources: "{{ vmi_info.resources | default([]) if effective_operation != 'delete' else [] }}"

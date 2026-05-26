@@ -1,0 +1,74 @@
+---
+- name: Resize OpenShift Virtualization DataVolume PVC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    effective_volume_name: "{{ volume_name | default(volume_id, true) }}"
+    effective_volume_project: "{{ volume_project | default(vm_project, true) | default(project, true) | default(namespace, true) }}"
+
+  tasks:
+    - name: Resolve requested volume size from quantity
+      ansible.builtin.set_fact:
+        effective_volume_size: "{{ new_size | default(volume_size, true) | default(size, true) }}"
+      when: (new_size is defined and new_size | string | length > 0) or (volume_size is defined and volume_size | string | length > 0) or (size is defined and size | string | length > 0)
+
+    - name: Resolve requested volume size from GiB value
+      ansible.builtin.set_fact:
+        effective_volume_size: "{{ (new_size_gb | default(volume_size_gb, true) | int) }}Gi"
+      when: effective_volume_size is not defined and ((new_size_gb is defined and new_size_gb | int > 0) or (volume_size_gb is defined and volume_size_gb | int > 0))
+
+    - name: Validate volume resize inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host is defined
+          - effective_host | length > 0
+          - effective_api_key is defined
+          - effective_api_key | length > 0
+          - effective_volume_name is defined
+          - effective_volume_name | length > 0
+          - effective_volume_project is defined
+          - effective_volume_project | length > 0
+          - effective_volume_size is defined
+          - effective_volume_size | string | length > 0
+        fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, volume_name/volume_id, volume_project, and new_size/volume_size/size or *_size_gb."
+
+    - name: Resize PVC backing the DataVolume
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/api/v1/namespaces/{{ effective_volume_project }}/persistentvolumeclaims/{{ effective_volume_name }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/merge-patch+json
+        body_format: json
+        body:
+          spec:
+            resources:
+              requests:
+                storage: "{{ effective_volume_size }}"
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: resize_result
+
+    - name: Expose EniCloud volume resize result
+      ansible.builtin.set_stats:
+        data:
+          volume_id: "{{ effective_volume_name }}"
+          volume_name: "{{ effective_volume_name }}"
+          volume_project: "{{ effective_volume_project }}"
+          new_size: "{{ effective_volume_size }}"
+          size: "{{ effective_volume_size }}"
+          eni_result:
+            volume_id: "{{ effective_volume_name }}"
+            volume_name: "{{ effective_volume_name }}"
+            volume_project: "{{ effective_volume_project }}"
+            new_size: "{{ effective_volume_size }}"
+            size: "{{ effective_volume_size }}"
+            status: resized
+            provider_response: "{{ resize_result.json | default({}) }}"

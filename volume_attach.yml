@@ -1,0 +1,96 @@
+---
+- name: Attach OpenShift Virtualization DataVolume to VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    wait: true
+    wait_retries: 30
+    wait_delay_seconds: 2
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    effective_vm_name: "{{ vm_name | default(resource_id, true) | default(name, true) }}"
+    effective_volume_name: "{{ volume_name | default(volume_id, true) }}"
+    effective_vm_project: "{{ vm_project | default(volume_project, true) | default(project, true) | default(namespace, true) }}"
+    effective_disk_bus: "{{ disk_bus | default('virtio', true) }}"
+    effective_volume_device: "{{ volume_device | default(effective_volume_name, true) }}"
+
+  tasks:
+    - name: Validate volume attach inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host is defined
+          - effective_host | length > 0
+          - effective_api_key is defined
+          - effective_api_key | length > 0
+          - effective_vm_name is defined
+          - effective_vm_name | length > 0
+          - effective_vm_project is defined
+          - effective_vm_project | length > 0
+          - effective_volume_name is defined
+          - effective_volume_name | length > 0
+        fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, vm_name/resource_id, vm_project, volume_name/volume_id."
+
+    - name: Attach DataVolume through KubeVirt hotplug subresource
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/apis/subresources.kubevirt.io/v1/namespaces/{{ effective_vm_project }}/virtualmachines/{{ effective_vm_name }}/addvolume"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/json
+        body_format: json
+        body:
+          apiVersion: subresources.kubevirt.io/v1
+          kind: AddVolumeOptions
+          name: "{{ effective_volume_name }}"
+          disk:
+            disk:
+              bus: "{{ effective_disk_bus }}"
+          volumeSource:
+            persistentVolumeClaim:
+              claimName: "{{ effective_volume_name }}"
+              hotpluggable: true
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 202
+      register: attach_result
+
+    - name: Wait for volume to appear on VirtualMachine
+      kubernetes.core.k8s_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vm_info
+      until: effective_volume_name in ((vm_info.resources | first).spec.template.spec.volumes | map(attribute='name') | list)
+      retries: "{{ wait_retries | int }}"
+      delay: "{{ wait_delay_seconds | int }}"
+      changed_when: false
+      when: wait | bool
+
+    - name: Expose EniCloud volume attach result
+      ansible.builtin.set_stats:
+        data:
+          volume_id: "{{ effective_volume_name }}"
+          volume_name: "{{ effective_volume_name }}"
+          volume_device: "{{ effective_volume_device }}"
+          device: "{{ effective_volume_device }}"
+          resource_id: "{{ effective_vm_name }}"
+          eni_result:
+            resource_id: "{{ effective_vm_name }}"
+            vm_name: "{{ effective_vm_name }}"
+            vm_project: "{{ effective_vm_project }}"
+            volume_id: "{{ effective_volume_name }}"
+            volume_name: "{{ effective_volume_name }}"
+            volume_device: "{{ effective_volume_device }}"
+            device: "{{ effective_volume_device }}"
+            status: attached
+            provider_response: "{{ attach_result.json | default({}) }}"

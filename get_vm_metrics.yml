@@ -1,0 +1,135 @@
+---
+- name: Get OpenShift Virtualization VM metrics for EniCloud
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    effective_vm_name: "{{ vm_name | default(resource_id, true) | default(name, true) }}"
+    effective_vm_project: "{{ vm_project | default(project, true) | default(namespace, true) }}"
+    effective_metrics_window: "{{ metrics_window | default('5m', true) }}"
+    prometheus_proxy_base_path: /api/v1/namespaces/openshift-monitoring/services/https:thanos-querier:9091/proxy
+    effective_metrics_base_url: "{{ metrics_base_url | default(metrics_backend_url, true) | default(prometheus_url, true) | default(thanos_url, true) | default((effective_host | regex_replace('/+$', '')) ~ prometheus_proxy_base_path, true) }}"
+    effective_metrics_query_url: "{{ metrics_query_url | default((effective_metrics_base_url | regex_replace('/+$', '')) ~ '/api/v1/query', true) }}"
+    cpu_query: >-
+      sum(rate(kubevirt_vmi_cpu_usage_seconds_total{namespace="{{ effective_vm_project }}",name="{{ effective_vm_name }}"}[{{ effective_metrics_window }}])) * 100
+    memory_used_query: >-
+      sum(kubevirt_vmi_memory_resident_bytes{namespace="{{ effective_vm_project }}",name="{{ effective_vm_name }}"})
+    disk_used_query: >-
+      sum(kubevirt_vmi_filesystem_used_bytes{namespace="{{ effective_vm_project }}",name="{{ effective_vm_name }}"})
+    disk_capacity_query: >-
+      sum(kubevirt_vmi_filesystem_capacity_bytes{namespace="{{ effective_vm_project }}",name="{{ effective_vm_name }}"})
+
+  tasks:
+    - name: Validate metrics inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host is defined
+          - effective_host | length > 0
+          - effective_api_key is defined
+          - effective_api_key | length > 0
+          - effective_vm_name is defined
+          - effective_vm_name | length > 0
+          - effective_vm_project is defined
+          - effective_vm_project | length > 0
+          - effective_metrics_query_url is defined
+          - effective_metrics_query_url | length > 0
+        fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, vm_name/resource_id, vm_project/namespace."
+
+    - name: Read VM instance details
+      redhat.openshift_virtualization.kubevirt_vmi_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vmi_info
+      failed_when: false
+      changed_when: false
+
+    - name: Query CPU usage from OpenShift monitoring
+      ansible.builtin.uri:
+        url: "{{ effective_metrics_query_url }}?query={{ cpu_query | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: cpu_metrics
+      failed_when: false
+      changed_when: false
+
+    - name: Query memory usage from OpenShift monitoring
+      ansible.builtin.uri:
+        url: "{{ effective_metrics_query_url }}?query={{ memory_used_query | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: memory_metrics
+      failed_when: false
+      changed_when: false
+
+    - name: Query disk usage from OpenShift monitoring
+      ansible.builtin.uri:
+        url: "{{ effective_metrics_query_url }}?query={{ disk_used_query | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: disk_used_metrics
+      failed_when: false
+      changed_when: false
+
+    - name: Query disk capacity from OpenShift monitoring
+      ansible.builtin.uri:
+        url: "{{ effective_metrics_query_url }}?query={{ disk_capacity_query | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: disk_capacity_metrics
+      failed_when: false
+      changed_when: false
+
+    - name: Expose EniCloud metrics result
+      ansible.builtin.set_stats:
+        data:
+          resource_id: "{{ effective_vm_name }}"
+          vm_name: "{{ effective_vm_name }}"
+          vm_project: "{{ effective_vm_project }}"
+          metrics_window: "{{ effective_metrics_window }}"
+          metrics_base_url: "{{ effective_metrics_base_url }}"
+          eni_result:
+            resource_id: "{{ effective_vm_name }}"
+            vm_name: "{{ effective_vm_name }}"
+            vm_project: "{{ effective_vm_project }}"
+            metrics_window: "{{ effective_metrics_window }}"
+            metrics_base_url: "{{ effective_metrics_base_url }}"
+            status: "{{ (vmi_info.resources | default([]) | first | default({})).status.phase | default('Unknown') }}"
+            primary_ip: "{{ ((vmi_info.resources | default([]) | first | default({})).status.interfaces | default([]) | first | default({})).ipAddress | default('') }}"
+            queries:
+              cpu_usage_percent: "{{ cpu_query }}"
+              memory_used_bytes: "{{ memory_used_query }}"
+              disk_used_bytes: "{{ disk_used_query }}"
+              disk_capacity_bytes: "{{ disk_capacity_query }}"
+            metrics:
+              cpu_usage_percent: "{{ cpu_metrics.json | default({}) }}"
+              memory_used_bytes: "{{ memory_metrics.json | default({}) }}"
+              disk_used_bytes: "{{ disk_used_metrics.json | default({}) }}"
+              disk_capacity_bytes: "{{ disk_capacity_metrics.json | default({}) }}"
+            resources: "{{ vmi_info.resources | default([]) }}"

@@ -1,0 +1,214 @@
+---
+- name: Resize OpenShift Virtualization VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    effective_vm_name: "{{ vm_name | default(resource_id, true) | default(name, true) }}"
+    effective_vm_project: "{{ vm_project | default(project, true) | default(namespace, true) }}"
+
+  tasks:
+    - name: Resolve requested vCPU
+      ansible.builtin.set_fact:
+        effective_vcpu: "{{ vcpu | default(cpu_cores, true) | default(cpu, true) }}"
+      when: (vcpu is defined and vcpu | int > 0) or (cpu_cores is defined and cpu_cores | int > 0) or (cpu is defined and cpu | int > 0)
+
+    - name: Resolve requested memory
+      ansible.builtin.set_fact:
+        effective_memory: "{{ memory_size | default(memory, true) | default(ram, true) }}"
+      when: (memory_size is defined and memory_size | string | length > 0) or (memory is defined and memory | string | length > 0) or (ram is defined and ram | string | length > 0)
+
+    - name: Resolve requested memory from GiB value
+      ansible.builtin.set_fact:
+        effective_memory: "{{ (ram_gb | int) }}Gi"
+      when: effective_memory is not defined and ram_gb is defined and ram_gb | int > 0
+
+    - name: Resolve requested disk from GiB value
+      ansible.builtin.set_fact:
+        effective_disk: "{{ (disk_gb | int) }}Gi"
+      when: disk_gb is defined and disk_gb | int > 0
+
+    - name: Validate VM resize inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host is defined
+          - effective_host | length > 0
+          - effective_api_key is defined
+          - effective_api_key | length > 0
+          - effective_vm_name is defined
+          - effective_vm_name | length > 0
+          - effective_vm_project is defined
+          - effective_vm_project | length > 0
+          - effective_vcpu is defined or effective_memory is defined or effective_disk is defined
+        fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, vm_name/resource_id, vm_project and at least one of vcpu/cpu_cores/cpu, memory_size/memory/ram/ram_gb or disk_gb."
+
+    - name: Fetch VM definition before disk resize
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/apis/kubevirt.io/v1/namespaces/{{ effective_vm_project }}/virtualmachines/{{ effective_vm_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: vm_definition
+      when: effective_disk is defined
+
+    - name: Resolve VM root PVC name
+      ansible.builtin.set_fact:
+        root_pvc_name: >-
+          {{
+            (
+              vm_definition.json.spec.template.spec.volumes
+              | default([])
+              | selectattr('name', 'defined')
+              | selectattr('name', 'match', '(?i).*(root|boot|osdisk|system).*')
+              | map(attribute='dataVolume.name')
+              | select('defined')
+              | first
+              | default('', true)
+            )
+            or
+            (
+              vm_definition.json.spec.template.spec.volumes
+              | default([])
+              | selectattr('name', 'defined')
+              | selectattr('name', 'match', '(?i).*(root|boot|osdisk|system).*')
+              | map(attribute='persistentVolumeClaim.claimName')
+              | select('defined')
+              | first
+              | default('', true)
+            )
+            or
+            (
+              vm_definition.json.spec.template.spec.volumes
+              | default([])
+              | map(attribute='dataVolume.name')
+              | select('defined')
+              | first
+              | default('', true)
+            )
+            or
+            (
+              vm_definition.json.spec.template.spec.volumes
+              | default([])
+              | map(attribute='persistentVolumeClaim.claimName')
+              | select('defined')
+              | first
+              | default('', true)
+            )
+            or
+            (
+              vm_definition.json.spec.dataVolumeTemplates
+              | default([])
+              | selectattr('metadata.name', 'defined')
+              | selectattr('metadata.name', 'match', '(?i).*(root|boot|osdisk|system).*')
+              | map(attribute='metadata.name')
+              | first
+              | default('', true)
+            )
+            or
+            (
+              vm_definition.json.spec.dataVolumeTemplates
+              | default([])
+              | map(attribute='metadata.name')
+              | select('defined')
+              | first
+              | default('', true)
+            )
+          }}
+      when: effective_disk is defined
+
+    - name: Validate VM root PVC resolution
+      ansible.builtin.assert:
+        that:
+          - root_pvc_name is defined
+          - root_pvc_name | length > 0
+        fail_msg: "Cannot resolve root PVC/DataVolume for OpenShift VM disk resize."
+      when: effective_disk is defined
+
+    - name: Patch VM root PVC size
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/api/v1/namespaces/{{ effective_vm_project }}/persistentvolumeclaims/{{ root_pvc_name }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/merge-patch+json
+        body_format: json
+        body:
+          spec:
+            resources:
+              requests:
+                storage: "{{ effective_disk }}"
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: disk_resize_result
+      when: effective_disk is defined
+
+    - name: Build VM resource requests patch
+      ansible.builtin.set_fact:
+        vm_resource_requests: >-
+          {{
+            {}
+            | combine(({'cpu': effective_vcpu | string}) if effective_vcpu is defined else {})
+            | combine(({'memory': effective_memory | string}) if effective_memory is defined else {})
+          }}
+
+    - name: Build VM guest topology patch
+      ansible.builtin.set_fact:
+        vm_domain_patch: >-
+          {{
+            {}
+            | combine(({'cpu': {'cores': effective_vcpu | int}}) if effective_vcpu is defined else {})
+            | combine(({'memory': {'guest': effective_memory | string}}) if effective_memory is defined else {})
+            | combine({'resources': {'requests': vm_resource_requests}})
+          }}
+
+    - name: Patch VM guest CPU, memory and scheduling requests
+      ansible.builtin.uri:
+        url: "{{ effective_host | regex_replace('/+$', '') }}/apis/kubevirt.io/v1/namespaces/{{ effective_vm_project }}/virtualmachines/{{ effective_vm_name }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ effective_api_key }}"
+          Accept: application/json
+          Content-Type: application/merge-patch+json
+        body_format: json
+        body:
+          spec:
+            template:
+              spec:
+                domain: "{{ vm_domain_patch }}"
+        validate_certs: "{{ validate_certs }}"
+        return_content: true
+        status_code: 200
+      register: resize_result
+      when: effective_vcpu is defined or effective_memory is defined
+
+    - name: Expose EniCloud VM resize result
+      ansible.builtin.set_stats:
+        data:
+          resource_id: "{{ effective_vm_name }}"
+          vm_name: "{{ effective_vm_name }}"
+          vm_project: "{{ effective_vm_project }}"
+          vcpu: "{{ effective_vcpu | default('') }}"
+          memory: "{{ effective_memory | default('') }}"
+          disk: "{{ effective_disk | default('') }}"
+          root_pvc_name: "{{ root_pvc_name | default('') }}"
+          eni_result:
+            resource_id: "{{ effective_vm_name }}"
+            vm_name: "{{ effective_vm_name }}"
+            vm_project: "{{ effective_vm_project }}"
+            vcpu: "{{ effective_vcpu | default('') }}"
+            memory: "{{ effective_memory | default('') }}"
+            disk: "{{ effective_disk | default('') }}"
+            root_pvc_name: "{{ root_pvc_name | default('') }}"
+            status: resized
+            provider_response: "{{ resize_result.json | default({}) }}"
+            disk_resize_response: "{{ disk_resize_result.json | default({}) }}"

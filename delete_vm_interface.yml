@@ -1,0 +1,72 @@
+- name: Create a VM on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+  tasks:
+  - name: Get the details of requested VirtualMachines
+    redhat.openshift_virtualization.kubevirt_vmi_info:
+      namespace: "{{ vm_project }}"
+      api_key: "{{ api_key }}"
+      name: "{{vm_name}}"
+    register: vmdetails
+
+  - debug:
+      msg: "{{ vmdetails['resources'][0]['spec']['networks'] | difference([item]) }}"
+    loop: "{{ vmdetails['resources'][0]['spec']['networks'] }}"
+    when: item is search(vm_del_net | string)
+    register: networks
+
+  - name: Zostaw tylko usuwany interfejs
+    set_fact:
+      network: "{{ networks.results | rejectattr('skipped', 'defined') | list }}"
+
+  - name: zapisz nazwe interfejsu
+    set_fact:
+      int_name: "{{network[0]['item']['name']}}"
+
+  - debug:
+      msg: "{{ vmdetails['resources'][0]['spec']['networks'] | difference([item]) }}"
+    loop: "{{ vmdetails['resources'][0]['spec']['networks'] }}"
+    when: item is not search(vm_del_net | string)
+    register: networks
+
+  - name: Zostaw tylko nie usuwane interfejsy
+    set_fact:
+      network: "{{ networks.results | rejectattr('skipped', 'defined') | list }}"  
+
+#  - debug:
+#      msg: "{{network[0]['item']}}"
+
+# interfaces
+  - debug:
+      msg: "{{ vmdetails['resources'][0]['spec']['domain']['devices']['interfaces'] | difference([item]) }}"
+    loop: "{{ vmdetails['resources'][0]['spec']['domain']['devices']['interfaces'] }}"
+    when: item is search(network[0]['item']['name'] | string)
+    register: interfaces
+
+  - name: Zostaw tylko te, które faktycznie się wykonały
+    set_fact:
+      interface: "{{ interfaces.results | rejectattr('skipped', 'defined') | list }}"
+
+  - debug:
+      msg: "{{interface[0]['item']}}"
+  #- fail: {}
+
+  - name: Patch/Update the existing VirtualMachine configuration
+    kubernetes.core.k8s:
+      state: patched
+      kind: VirtualMachine
+      name: "{{vm_name}}"
+      namespace: "{{vm_project}}"
+      merge_type: merge
+      definition:
+        spec:
+          template:
+            spec:
+              domain:
+                devices:
+                  interfaces: "{{[interface[0]['item']]}}"
+              networks: "{{[network[0]['item']]}}"
+
+          

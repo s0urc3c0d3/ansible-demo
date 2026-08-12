@@ -1,0 +1,55 @@
+- name: Create a VM on OpenShift Virtualization
+  #hosts: localhost
+  hosts: openshift
+  #connection: local
+  gather_facts: false
+  tasks:
+  - name: Generate new nic name
+    debug:
+      msg: "nic-{{ lookup('community.general.random_pet', words=2) }}-{{99 | random(start=10)}}"
+    register: output
+
+  - name: Get a list of all VirtualMachines
+    redhat.openshift_virtualization.kubevirt_vmi_info:
+      namespace: "{{ vm_project }}"
+      api_key: "{{ api_key }}"
+      name: "{{vm_name}}"
+    register: vmdetails
+
+  - name: Append new interface item
+    set_fact:
+      interfaces: "{{ vmdetails['resources'][0]['spec']['domain']['devices']['interfaces'] + [new_int]}}"
+    vars:
+      new_int:
+        bridge: {} 
+        macAddress: "{{ '02:aa:26' | community.general.random_mac }}"
+        model: virtio
+        name: "{{output.msg}}"
+        state: up  
+
+  - name: Append new interface item
+    set_fact:
+      networks: "{{ vmdetails['resources'][0]['spec']['networks'] + [new_net]}}"
+    vars:
+      new_net:
+        multus: 
+          networkName: "{{vm_new_net}}"
+        name: "{{output.msg}}"
+
+  - name: Patch/Update the existing VirtualMachine configuration
+    kubernetes.core.k8s:
+      state: patched
+      kind: VirtualMachine
+      name: "{{vm_name}}"
+      namespace: "{{vm_project}}"
+      merge_type: merge
+      definition:
+        spec:
+          template:
+            spec:
+              domain:
+                devices:
+                  interfaces: "{{interfaces}}"
+              networks: "{{networks}}"
+
+          

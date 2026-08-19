@@ -20,12 +20,63 @@
     # Cloud-init / Access
 #    ssh_key_secret: my-ssh-key-secret
     cloud_init_password: redhat
+    default_cloud_init_user_data: |
+      #cloud-config
+      user: cloud-user
+      password: {{ cloud_init_password }}
+      chpasswd: { expire: False }
+    # The drop-in every machine is created with. Without it, attaching a public address
+    # later can never reach the guest: KubeVirt derives the NoCloud instance-id from the
+    # machine's own firmware UUID, which it persists, so a restart is the SAME instance to
+    # cloud-init and a rewritten seed is read and discarded -- the guest's own log says
+    # "No network config applied. Neither a new instance nor datasource network update
+    # allowed". Measured on the cluster in both directions. Written for every machine, not
+    # only one created with an address, because the machine that needs it is precisely the
+    # one whose address arrives later.
+    enicloud_network_reapply_file:
+      path: /etc/cloud/cloud.cfg.d/99-enicloud-network.cfg
+      permissions: '0644'
+      owner: root:root
+      content: |
+        updates:
+          network:
+            when: [boot]
+    base_cloud_init_user_data: "{{ user_data | default(default_cloud_init_user_data, true) }}"
 
     # API access
     #api_key: "{{ lookup('env', 'OPENSHIFT_API_KEY') }}"
     validate_certs: false
 
   tasks:
+    # Merged into the document rather than appended: appending a second `write_files:` key
+    # to user data that already has one produces a duplicate key and silently loses part of
+    # the operator's configuration. If their document cannot be parsed we leave it exactly
+    # as supplied and skip the drop-in -- creating the machine matters more than the
+    # optimisation, and the attach path degrades honestly to manual_required without it.
+    - name: Add the network-reapply drop-in to cloud-init user data
+      block:
+        - name: Merge the drop-in into the operator's cloud-config
+          ansible.builtin.set_fact:
+            cloud_init_user_data: >-
+              {{ '#cloud-config' ~ '\n'
+                 ~ (parsed | combine({'write_files':
+                      (parsed.write_files | default([])) + [enicloud_network_reapply_file]})
+                    | to_nice_yaml) }}
+          vars:
+            parsed: >-
+              {{ base_cloud_init_user_data
+                 | regex_replace('^\\s*#cloud-config\\s*', '') | from_yaml }}
+          when: "'99-enicloud-network.cfg' not in base_cloud_init_user_data"
+      rescue:
+        - name: Keep the operator's cloud-config untouched when it cannot be parsed
+          ansible.builtin.set_fact:
+            cloud_init_user_data: "{{ base_cloud_init_user_data }}"
+
+    - name: Default cloud-init user data when the drop-in was skipped
+      ansible.builtin.set_fact:
+        cloud_init_user_data: "{{ base_cloud_init_user_data }}"
+      when: cloud_init_user_data is not defined
+
     - name: Create virtual machine
       redhat.openshift_virtualization.kubevirt_vm:
         name: "{{ vm_name }}"
@@ -34,7 +85,7 @@
         running: true
         validate_certs: "{{ validate_certs }}"
         state: present
-        
+
         labels:
           app: "{{ vm_name }}"
           kubevirt.io/dynamic-credentials-support: 'true'
@@ -95,9 +146,30 @@
                 name: "{{ vm_name }}"
               name: 'rootdisk'
             - cloudInitNoCloud:
-                userData: |
-                  #cloud-config
-                  user: cloud-user
-                  password: {{ cloud_init_password }}
-                  chpasswd: { expire: False }
+                userData: "{{ cloud_init_user_data }}"
               name: 'cloudinitdisk'
+      register: create_vm_result
+
+    - name: Expose EniCloud VM create result
+      ansible.builtin.set_stats:
+        data:
+          resource_id: "{{ vm_name }}"
+          vm_name: "{{ vm_name }}"
+          vm_project: "{{ vm_project }}"
+          namespace: "{{ vm_project }}"
+          status: Running
+          root_volume_id: "{{ vm_name }}"
+          root_volume_name: "{{ vm_name }}"
+          root_volume_project: "{{ vm_project }}"
+          root_volume_device: rootdisk
+          eni_result:
+            resource_id: "{{ vm_name }}"
+            vm_name: "{{ vm_name }}"
+            vm_project: "{{ vm_project }}"
+            namespace: "{{ vm_project }}"
+            status: Running
+            root_volume_id: "{{ vm_name }}"
+            root_volume_name: "{{ vm_name }}"
+            root_volume_project: "{{ vm_project }}"
+            root_volume_device: rootdisk
+            root_volume_source_url: "{{ url }}"

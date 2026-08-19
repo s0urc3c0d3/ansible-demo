@@ -1,0 +1,269 @@
+---
+# EniCloud action: public_ip_attach
+#
+# Adds the portal-managed public interface to a VirtualMachine and reports what
+# actually happened, on two independent axes:
+#
+#   runtime_attachment  attached | restart_required | desired_only
+#   guest_configuration manual_required | delivered_unconfirmed
+#
+# The playbook never claims working connectivity it cannot observe.
+#
+# WHO OWNS THE ADDRESS. EniCloud declares this provider `provider_managed`: it does
+# not allocate an address for AAP machines, it RECEIVES whatever this playbook reports
+# in `eni_result.public_ip`. `public_ip` is therefore an OPTIONAL input -- supply it
+# from the job survey, an inventory or your own IPAM. Requiring it would have failed
+# every EniCloud-driven attach on input validation, because EniCloud has none to send.
+#
+# GUEST ADDRESSING happens only when this run has both an address and a prefix length.
+# With them the playbook writes cloud-init network data into the machine and reports
+# `delivered_unconfirmed`; without them it attaches the interface and reports
+# `manual_required`, which is the truth -- the pool networks carry no DHCP, so nothing
+# reaches the guest by itself.
+#
+# The guest applies that data on its NEXT BOOT, and only if the machine carries
+# /etc/cloud/cloud.cfg.d/99-enicloud-network.cfg (written by create_vm_from_url.yml).
+# KubeVirt derives the NoCloud instance-id from the machine's own firmware UUID, so a
+# restart is the SAME instance to cloud-init and a rewritten seed is otherwise read and
+# discarded.
+#
+# Credentials come from the playbook vars or from an AAP credential. Never hardcode
+# a ServiceAccount token in the job template extra_vars.
+- name: Attach EniCloud public interface to OpenShift Virtualization VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    wait: true
+    wait_retries: 20
+    wait_delay_seconds: 3
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    # Nested rather than chained. `a | default(b, true)` evaluates b as an ARGUMENT, so a
+    # chain over optional names raises "'ip' is undefined" instead of falling through --
+    # caught by running these plays, not by reading them. Nesting applies the default TO
+    # each name, so an absent one is simply skipped.
+    effective_vm_name: >-
+      {{ vm_name | default(resource_id | default(name | default('', true), true), true) }}
+    effective_vm_project: >-
+      {{ vm_project | default(project | default(namespace | default('', true), true), true) }}
+    effective_network_ref: >-
+      {{ public_network_ref | default(network_ref | default(vm_new_net
+         | default(network_name | default('', true), true), true), true) }}
+    effective_interface_name: "{{ interface_name | default('enicloud-public', true) }}"
+    effective_public_ip: >-
+      {{ public_ip | default(address | default(ip | default('', true), true), true) }}
+    effective_prefix_length: "{{ prefix_length | default('', true) }}"
+    effective_gateway: "{{ gateway | default('', true) }}"
+    # Deterministic, locally administered MAC, and the ONE derivation the whole system
+    # uses: EniCloud's shared helper hashes "<vm_name>\u0000<interface_name>" with sha256
+    # and takes the first five bytes after the 0x02 prefix. Detach, reconciliation and the
+    # guest's network data all match the managed entry ON this value, so a second
+    # derivation would hand the same machine a different MAC. EniCloud passes it
+    # explicitly; this fallback is for running the playbook by hand.
+    derived_mac: "02:{{ ((effective_vm_name ~ '\u0000' ~ effective_interface_name) | hash('sha256'))[0:10] | batch(2) | map('join') | join(':') }}"
+    effective_mac: "{{ mac_address | default(derived_mac, true) }}"
+    # Guest-side names and routing table, kept in step with EniCloud's own renderer in
+    # application/services/vm/public_network_data.py so both paths produce the same guest.
+    guest_primary_interface: "{{ primary_interface_name | default('enp1s0', true) }}"
+    guest_public_interface: "{{ guest_interface_name | default('enipub0', true) }}"
+    guest_route_table: "{{ route_table | default(200, true) | int }}"
+    can_render_guest_data: >-
+      {{ (effective_public_ip | length > 0)
+         and (effective_prefix_length | string | length > 0) }}
+
+  tasks:
+    - name: Validate public IP attach inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host | length > 0
+          - effective_api_key | length > 0
+          - effective_vm_name | length > 0
+          - effective_vm_project | length > 0
+          - effective_network_ref | length > 0
+        fail_msg: >-
+          Required vars: host/api_key or an AAP Kubernetes credential,
+          vm_name/resource_id, vm_project and public_network_ref. public_ip is optional:
+          EniCloud treats this provider as provider-managed and receives what is reported.
+
+    - name: Read current VirtualMachine definition
+      kubernetes.core.k8s_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vm_info
+
+    - name: Fail when the VirtualMachine does not exist
+      ansible.builtin.assert:
+        that:
+          - vm_info.resources | length > 0
+        fail_msg: "VirtualMachine {{ effective_vm_project }}/{{ effective_vm_name }} not found."
+
+    - name: Capture current network devices
+      ansible.builtin.set_fact:
+        current_vm: "{{ vm_info.resources | first }}"
+        current_interfaces: "{{ (vm_info.resources | first).spec.template.spec.domain.devices.interfaces | default([], true) }}"
+        current_networks: "{{ (vm_info.resources | first).spec.template.spec.networks | default([], true) }}"
+        current_volumes: "{{ (vm_info.resources | first).spec.template.spec.volumes | default([], true) }}"
+
+    - name: Build desired network devices
+      ansible.builtin.set_fact:
+        desired_interfaces: >-
+          {{ (current_interfaces | rejectattr('name', 'equalto', effective_interface_name) | list)
+             + [{'name': effective_interface_name, 'bridge': {}, 'model': 'virtio', 'macAddress': effective_mac}] }}
+        desired_networks: >-
+          {{ (current_networks | rejectattr('name', 'equalto', effective_interface_name) | list)
+             + [{'name': effective_interface_name, 'multus': {'networkName': effective_network_ref}}] }}
+
+    # Rendered only when this run has both an address and a prefix: with either missing
+    # there is nothing truthful to write. The document matches the guest NIC on the MAC
+    # rather than on interface order, which is not stable across boots, and gives the
+    # public interface its own routing table plus a source rule so replies leave through
+    # the public gateway while the pod network keeps the main default route.
+    - name: Render cloud-init network data for the public interface
+      ansible.builtin.set_fact:
+        public_network_data: "{{ rendered | to_nice_yaml }}"
+      vars:
+        rendered:
+          version: 2
+          ethernets: >-
+            {{ {guest_primary_interface: {'match': {'name': guest_primary_interface},
+                                          'dhcp4': true, 'dhcp6': false},
+                guest_public_interface: {'match': {'macaddress': effective_mac},
+                                         'set-name': guest_public_interface,
+                                         'dhcp4': false, 'dhcp6': false,
+                                         'addresses': [effective_public_ip ~ '/' ~ effective_prefix_length],
+                                         'routes': ([{'to': 'default', 'via': effective_gateway,
+                                                      'table': guest_route_table}]
+                                                    if (effective_gateway | length > 0) else []),
+                                         'routing-policy': ([{'from': effective_public_ip,
+                                                              'table': guest_route_table}]
+                                                            if (effective_gateway | length > 0) else [])}} }}
+      when: can_render_guest_data | bool
+
+    # Folded into the SAME patch as the interface rather than addressed by index in a
+    # second one: one resourceVersion precondition then covers the whole change, and
+    # nothing has to compute where the cloud-init volume sits in the list. KubeVirt
+    # accepts networkData inline beside userData, so no Secret is involved.
+    - name: Build desired volumes carrying the network data
+      ansible.builtin.set_fact:
+        desired_volumes: >-
+          {{ desired_volumes | default([])
+             + [ item | combine({'cloudInitNoCloud':
+                   item.cloudInitNoCloud | combine({'networkData': public_network_data})})
+                 if ('cloudInitNoCloud' in item) else item ] }}
+      loop: "{{ current_volumes }}"
+      loop_control:
+        label: "{{ item.name | default('volume') }}"
+      when: can_render_guest_data | bool
+
+    - name: Record whether the machine can carry guest network data
+      ansible.builtin.set_fact:
+        guest_data_written: >-
+          {{ (can_render_guest_data | bool)
+             and ((current_volumes | selectattr('cloudInitNoCloud', 'defined') | list | length) > 0) }}
+
+    - name: Detect whether the desired interface is already declared
+      ansible.builtin.set_fact:
+        already_declared: >-
+          {{ (current_interfaces | selectattr('name', 'equalto', effective_interface_name) | list | length > 0)
+             and (current_networks | selectattr('name', 'equalto', effective_interface_name)
+                  | map(attribute='multus.networkName') | select('equalto', effective_network_ref) | list | length > 0) }}
+
+    # A resourceVersion precondition makes a concurrent interface edit fail loudly
+    # instead of being silently overwritten by this read-modify-write.
+    - name: Patch VirtualMachine with the portal-managed interface
+      kubernetes.core.k8s_json_patch:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+        patch:
+          - op: test
+            path: /metadata/resourceVersion
+            value: "{{ current_vm.metadata.resourceVersion }}"
+          - op: replace
+            path: /spec/template/spec/domain/devices/interfaces
+            value: "{{ desired_interfaces }}"
+          - op: replace
+            path: /spec/template/spec/networks
+            value: "{{ desired_networks }}"
+      when: not (already_declared | bool)
+      register: patch_result
+
+    - name: Patch VirtualMachine with the guest network data
+      kubernetes.core.k8s_json_patch:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+        patch:
+          - op: replace
+            path: /spec/template/spec/volumes
+            value: "{{ desired_volumes }}"
+      when: guest_data_written | bool
+      register: guest_data_patch
+
+    - name: Wait for the interface to reach the running VirtualMachineInstance
+      kubernetes.core.k8s_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vmi_info
+      until: >-
+        (vmi_info.resources | length == 0)
+        or (effective_interface_name in ((vmi_info.resources | first).status.interfaces | default([], true) | map(attribute='name') | list))
+      retries: "{{ wait_retries | int }}"
+      delay: "{{ wait_delay_seconds | int }}"
+      changed_when: false
+      failed_when: false
+      when: wait | bool
+
+    - name: Resolve the runtime attachment outcome
+      ansible.builtin.set_fact:
+        runtime_attachment: >-
+          {{ 'attached'
+             if (vmi_info.resources | default([], true) | length > 0
+                 and effective_interface_name in ((vmi_info.resources | first).status.interfaces | default([], true) | map(attribute='name') | list))
+             else ('restart_required' if (vmi_info.resources | default([], true) | length > 0) else 'desired_only') }}
+
+    - name: Expose EniCloud public IP attach result
+      ansible.builtin.set_stats:
+        data:
+          public_ip: "{{ effective_public_ip }}"
+          resource_id: "{{ effective_vm_name }}"
+          eni_result:
+            resource_id: "{{ effective_vm_name }}"
+            vm_name: "{{ effective_vm_name }}"
+            vm_project: "{{ effective_vm_project }}"
+            public_ip: "{{ effective_public_ip }}"
+            prefix_length: "{{ effective_prefix_length }}"
+            gateway: "{{ effective_gateway }}"
+            network_ref: "{{ effective_network_ref }}"
+            interface_name: "{{ effective_interface_name }}"
+            mac_address: "{{ effective_mac }}"
+            runtime_attachment: "{{ runtime_attachment }}"
+            # delivered_unconfirmed only when the data was actually written: the portal
+            # delivered a document and nothing inside the guest has confirmed applying it.
+            # Otherwise manual_required, which is the truth when nothing reached the machine.
+            guest_configuration: >-
+              {{ 'delivered_unconfirmed'
+                 if ((guest_data_written | bool) and not (guest_data_patch.failed | default(false)))
+                 else 'manual_required' }}
+            provider_response: "{{ patch_result.result | default({}) }}"

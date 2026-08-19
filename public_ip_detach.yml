@@ -1,0 +1,218 @@
+---
+# EniCloud action: public_ip_detach
+#
+# Hot-unplugs the portal-managed public interface using the documented KubeVirt
+# semantics: the interface is marked `state: absent` in the VirtualMachine spec and
+# only removed from the spec once the running VirtualMachineInstance no longer
+# exposes it. Deleting the entry outright does NOT detach it from a running guest.
+#
+# The result reports whether the address may be released:
+#
+#   runtime_attachment  absent | restart_required
+#   released            true only together with `absent`
+#
+# EniCloud must not return the address to its pool before runtime absence is
+# confirmed, otherwise the same address can be handed to another machine while the
+# old one still holds it.
+#
+# Credentials come from the playbook vars or from an AAP credential. Never hardcode
+# a ServiceAccount token in the job template extra_vars.
+- name: Detach EniCloud public interface from OpenShift Virtualization VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+    wait: true
+    wait_retries: 20
+    wait_delay_seconds: 3
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    # Nested rather than chained. `a | default(b, true)` evaluates b as an ARGUMENT, so a
+    # chain over optional names raises "'ip' is undefined" instead of falling through --
+    # caught by running these plays, not by reading them. Nesting applies the default TO
+    # each name, so an absent one is simply skipped.
+    effective_vm_name: >-
+      {{ vm_name | default(resource_id | default(name | default('', true), true), true) }}
+    effective_vm_project: >-
+      {{ vm_project | default(project | default(namespace | default('', true), true), true) }}
+    effective_interface_name: >-
+      {{ interface_name | default(vm_del_net | default('enicloud-public', true), true) }}
+    effective_public_ip: >-
+      {{ public_ip | default(address | default('', true), true) }}
+
+  tasks:
+    - name: Validate public IP detach inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host | length > 0
+          - effective_api_key | length > 0
+          - effective_vm_name | length > 0
+          - effective_vm_project | length > 0
+          - effective_interface_name | length > 0
+        fail_msg: >-
+          Required vars: host/api_key or an AAP Kubernetes credential,
+          vm_name/resource_id and vm_project.
+
+    - name: Read current VirtualMachine definition
+      kubernetes.core.k8s_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vm_info
+
+    - name: Fail when the VirtualMachine does not exist
+      ansible.builtin.assert:
+        that:
+          - vm_info.resources | length > 0
+        fail_msg: "VirtualMachine {{ effective_vm_project }}/{{ effective_vm_name }} not found."
+
+    - name: Capture current network devices
+      ansible.builtin.set_fact:
+        current_vm: "{{ vm_info.resources | first }}"
+        current_interfaces: "{{ (vm_info.resources | first).spec.template.spec.domain.devices.interfaces | default([], true) }}"
+        current_networks: "{{ (vm_info.resources | first).spec.template.spec.networks | default([], true) }}"
+
+    - name: Detect whether the portal interface is still declared
+      ansible.builtin.set_fact:
+        interface_declared: >-
+          {{ current_interfaces | selectattr('name', 'equalto', effective_interface_name) | list | length > 0 }}
+
+    # Step 1 - request the hot-unplug. KubeVirt detaches the interface from the
+    # running guest when the desired entry carries `state: absent`.
+    - name: Mark the portal interface as absent
+      kubernetes.core.k8s_json_patch:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+        patch:
+          - op: test
+            path: /metadata/resourceVersion
+            value: "{{ current_vm.metadata.resourceVersion }}"
+          - op: replace
+            path: /spec/template/spec/domain/devices/interfaces
+            value: >-
+              {{ (current_interfaces | rejectattr('name', 'equalto', effective_interface_name) | list)
+                 + (current_interfaces | selectattr('name', 'equalto', effective_interface_name)
+                    | map('combine', {'state': 'absent'}) | list) }}
+      when: interface_declared | bool
+      register: unplug_result
+
+    - name: Wait for the interface to leave the running VirtualMachineInstance
+      kubernetes.core.k8s_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vmi_info
+      until: >-
+        (vmi_info.resources | length == 0)
+        or (effective_interface_name not in ((vmi_info.resources | first).status.interfaces | default([], true) | map(attribute='name') | list))
+      retries: "{{ wait_retries | int }}"
+      delay: "{{ wait_delay_seconds | int }}"
+      changed_when: false
+      failed_when: false
+      when: wait | bool
+
+    - name: Resolve the runtime detach outcome
+      ansible.builtin.set_fact:
+        runtime_absent: >-
+          {{ (vmi_info.resources | default([], true) | length == 0)
+             or (effective_interface_name not in ((vmi_info.resources | first).status.interfaces | default([], true) | map(attribute='name') | list)) }}
+
+    # Step 2 - only once the guest no longer holds the NIC do we drop the entry
+    # from the desired spec. Re-reading first avoids writing over a change made
+    # while we were waiting.
+    - name: Re-read VirtualMachine before final cleanup
+      kubernetes.core.k8s_info:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+      register: vm_info_final
+      when: runtime_absent | bool
+
+    - name: Build volumes without the public network data
+      ansible.builtin.set_fact:
+        cleaned_volumes: >-
+          {{ cleaned_volumes | default([])
+             + [ item | combine({'cloudInitNoCloud':
+                   item.cloudInitNoCloud | dict2items
+                   | rejectattr('key', 'equalto', 'networkData') | items2dict})
+                 if ('cloudInitNoCloud' in item) else item ] }}
+      loop: >-
+        {{ (vm_info_final.resources | first).spec.template.spec.volumes | default([], true)
+           if (vm_info_final.resources | default([], true) | length > 0) else [] }}
+      loop_control:
+        label: "{{ item.name | default('volume') }}"
+      when:
+        - runtime_absent | bool
+        - vm_info_final.resources | default([], true) | length > 0
+
+    - name: Remove the portal interface from the VirtualMachine spec
+      kubernetes.core.k8s_json_patch:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+        patch:
+          - op: test
+            path: /metadata/resourceVersion
+            value: "{{ (vm_info_final.resources | first).metadata.resourceVersion }}"
+          - op: replace
+            path: /spec/template/spec/domain/devices/interfaces
+            value: >-
+              {{ (vm_info_final.resources | first).spec.template.spec.domain.devices.interfaces
+                 | default([], true) | rejectattr('name', 'equalto', effective_interface_name) | list }}
+          - op: replace
+            path: /spec/template/spec/networks
+            value: >-
+              {{ (vm_info_final.resources | first).spec.template.spec.networks
+                 | default([], true) | rejectattr('name', 'equalto', effective_interface_name) | list }}
+          # Removing the interface has to remove the reason to configure it. Attach writes
+          # cloud-init network data describing this address; leaving it behind means every
+          # later boot re-reads a document for an address the machine no longer holds -- and,
+          # once released, one another machine may already own. Dropped in the SAME patch, so
+          # the machine never exists in a state where one is gone and the other is not. Only
+          # the networkData key goes: userData and any secretRef are the operator's.
+          - op: replace
+            path: /spec/template/spec/volumes
+            value: "{{ cleaned_volumes }}"
+      when:
+        - runtime_absent | bool
+        - vm_info_final.resources | default([], true) | length > 0
+      register: cleanup_result
+
+    - name: Expose EniCloud public IP detach result
+      ansible.builtin.set_stats:
+        data:
+          resource_id: "{{ effective_vm_name }}"
+          eni_result:
+            resource_id: "{{ effective_vm_name }}"
+            vm_name: "{{ effective_vm_name }}"
+            vm_project: "{{ effective_vm_project }}"
+            public_ip: "{{ effective_public_ip }}"
+            interface_name: "{{ effective_interface_name }}"
+            runtime_attachment: "{{ 'absent' if (runtime_absent | bool) else 'restart_required' }}"
+            # The address may only return to the pool once the guest no longer
+            # holds the interface.
+            released: "{{ runtime_absent | bool }}"
+            provider_response: "{{ cleanup_result.result | default(unplug_result.result | default({}), true) }}"

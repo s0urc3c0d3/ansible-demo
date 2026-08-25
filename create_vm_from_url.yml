@@ -58,11 +58,22 @@
         - name: Merge the drop-in into the operator's cloud-config
           ansible.builtin.set_fact:
             cloud_init_user_data: >-
-              {{ '#cloud-config' ~ '\n'
+              {{ '#cloud-config' ~ newline
                  ~ (parsed | combine({'write_files':
                       (parsed.write_files | default([])) + [enicloud_network_reapply_file]})
                     | to_nice_yaml) }}
           vars:
+            # A real newline carried in from YAML rather than `'\n'` written inside the
+            # expression. Measured on LAB: the merged document came out with the header and
+            # the first key on ONE line -- `#cloud-config\nchpasswd:` with a literal
+            # backslash -- and cloud-init identifies a document by its FIRST LINE, so it
+            # recognised nothing and discarded the entire user-data. The machine then had no
+            # password (console login refused) and no `99-enicloud-network.cfg` drop-in, and
+            # without that drop-in a public address never survives a reboot, because KubeVirt
+            # derives the NoCloud instance-id from the firmware UUID and cloud-init treats
+            # the restarted machine as the same instance. Double-quoted YAML is the one form
+            # that is guaranteed to yield the newline itself instead of two characters.
+            newline: "\n"
             parsed: >-
               {{ base_cloud_init_user_data
                  | regex_replace('^\\s*#cloud-config\\s*', '') | from_yaml }}

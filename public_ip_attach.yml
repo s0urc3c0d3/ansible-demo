@@ -126,6 +126,16 @@
     # rather than on interface order, which is not stable across boots, and gives the
     # public interface its own routing table plus a source rule so replies leave through
     # the public gateway while the pod network keeps the main default route.
+    # The default route is written as the CIDR 0.0.0.0/0, never netplan's `default`
+    # shorthand. Only Ubuntu-family guests hand this document to netplan; RHEL-family
+    # images have none, so cloud-init parses network-config v2 itself and accepts a CIDR
+    # only. Given the shorthand it raises "Address default is not a valid ip address" and
+    # abandons the WHOLE init-local stage, so the machine receives no network configuration
+    # at all -- not a broken route. Measured on a CentOS Stream 9 guest: with `default` the
+    # public interface carried link-local IPv6 only; with the CIDR the same machine took its
+    # address and answered on port 22. EniCloud's own renderer in
+    # application/services/vm/public_network_data.py carries the same fix, and the two must
+    # stay in step.
     - name: Render cloud-init network data for the public interface
       ansible.builtin.set_fact:
         public_network_data: "{{ rendered | to_nice_yaml }}"
@@ -139,7 +149,7 @@
                                          'set-name': guest_public_interface,
                                          'dhcp4': false, 'dhcp6': false,
                                          'addresses': [effective_public_ip ~ '/' ~ effective_prefix_length],
-                                         'routes': ([{'to': 'default', 'via': effective_gateway,
+                                         'routes': ([{'to': '0.0.0.0/0', 'via': effective_gateway,
                                                       'table': guest_route_table}]
                                                     if (effective_gateway | length > 0) else []),
                                          'routing-policy': ([{'from': effective_public_ip,

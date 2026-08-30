@@ -16,6 +16,21 @@
 
     # Network
     network_interface1_name: default-net
+    requested_data_volumes: "{{ data_volumes | default([], true) }}"
+    effective_public_ip: "{{ public_ip | default('', true) }}"
+    effective_prefix_length: "{{ prefix_length | default('', true) }}"
+    effective_gateway: "{{ gateway | default('', true) }}"
+    derived_public_mac_address: "02:{{ ((vm_name ~ '\u0000' ~ public_interface_name) | hash('sha256'))[0:10] | batch(2) | map('join') | join(':') }}"
+    effective_mac_address: "{{ mac_address | default(derived_public_mac_address, true) }}"
+    effective_primary_mac_address: "{{ primary_mac_address | default('', true) }}"
+    effective_public_network_ref: "{{ public_network_ref | default('', true) }}"
+    public_interface_name: "{{ interface_name | default('enicloud-public', true) }}"
+    guest_primary_interface: "{{ primary_interface_name | default('enp1s0', true) }}"
+    guest_public_interface: "{{ guest_interface_name | default('enipub0', true) }}"
+    guest_route_table: "{{ route_table | default(200, true) | int }}"
+    public_address_rendered: >-
+      {{ (effective_public_ip | string | length > 0)
+         and (effective_public_network_ref | string | length > 0) }}
 
     # Cloud-init / Access
 #    ssh_key_secret: my-ssh-key-secret
@@ -48,6 +63,92 @@
     validate_certs: false
 
   tasks:
+    - name: Validate EniCloud create operation id
+      ansible.builtin.assert:
+        that:
+          - (enicloud_operation_id | default('') | string | length) > 0
+          - >-
+            (enicloud_operation_id | default('') | string)
+            is match('^[A-Za-z0-9._-]{1,63}$')
+        fail_msg: >-
+          enicloud_operation_id is required and must be a Kubernetes label value
+          matching ^[A-Za-z0-9._-]{1,63}$.
+
+    - name: Validate create-time data volumes
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - (item.name | string) is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+          - item.size_gb is defined
+          - item.size_gb | int > 0
+          - item.delete_on_termination is defined
+        fail_msg: >-
+          Each data_volumes item requires a Kubernetes-compatible name, a positive
+          size_gb and delete_on_termination.
+      loop: "{{ requested_data_volumes }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+
+    - name: Validate create-time public address inputs
+      ansible.builtin.assert:
+        that:
+          - >-
+            (public_ip | default('') | string | length == 0)
+            or (prefix_length | default('') | string | length > 0)
+        fail_msg: "prefix_length is required together with public_ip."
+
+    - name: Find VirtualMachine by EniCloud operation id
+      kubernetes.core.k8s_info:
+        api_key: "{{ api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ vm_project }}"
+        label_selectors:
+          - "enicloud.io/operation-id={{ enicloud_operation_id }}"
+      register: operation_id_vm_info
+
+    - name: Reject an ambiguous EniCloud operation id
+      ansible.builtin.assert:
+        that:
+          - operation_id_vm_info.resources | length <= 1
+        fail_msg: >-
+          More than one VirtualMachine in {{ vm_project }} carries operation id
+          {{ enicloud_operation_id }}; refusing an ambiguous reuse.
+
+    - name: Read VirtualMachine with requested name
+      kubernetes.core.k8s_info:
+        api_key: "{{ api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_project }}"
+      register: requested_name_vm_info
+
+    - name: Reject a conflicting VirtualMachine name
+      ansible.builtin.assert:
+        that:
+          - >-
+            (requested_name_vm_info.resources | length == 0)
+            or
+            (((requested_name_vm_info.resources | first).metadata.labels
+              | default({}, true)).get('enicloud.io/operation-id', '')
+             == (enicloud_operation_id | string))
+        fail_msg: >-
+          VirtualMachine {{ vm_project }}/{{ vm_name }} already exists without
+          enicloud.io/operation-id={{ enicloud_operation_id }}; refusing to adopt it.
+
+    - name: Select VirtualMachine for idempotent reuse
+      ansible.builtin.set_fact:
+        existing_vm: >-
+          {{ (operation_id_vm_info.resources | first)
+             if (operation_id_vm_info.resources | length > 0)
+             else (requested_name_vm_info.resources | first) }}
+      when: >-
+        (operation_id_vm_info.resources | length > 0)
+        or (requested_name_vm_info.resources | length > 0)
+
     # Merged into the document rather than appended: appending a second `write_files:` key
     # to user data that already has one produces a duplicate key and silently loses part of
     # the operator's configuration. If their document cannot be parsed we leave it exactly
@@ -88,6 +189,154 @@
         cloud_init_user_data: "{{ base_cloud_init_user_data }}"
       when: cloud_init_user_data is not defined
 
+    # Rendered only when this run has both an address and a network reference. The
+    # document matches the public NIC on its MAC rather than on interface order. The
+    # primary interface is matched by MAC when EniCloud supplied one, otherwise by the
+    # existing guest-side name rule used by public_ip_attach.yml.
+    #
+    # The default route is written as the CIDR 0.0.0.0/0, never netplan's `default`
+    # shorthand. Only Ubuntu-family guests hand this document to netplan; RHEL-family
+    # images have none, so cloud-init parses network-config v2 itself and accepts a CIDR
+    # only. Given the shorthand it raises "Address default is not a valid ip address" and
+    # abandons the WHOLE init-local stage. Keep this structure and its routing table in
+    # step with public_ip_attach.yml and public_network_data.py.
+    - name: Render cloud-init network data for the public interface
+      ansible.builtin.set_fact:
+        public_network_data: "{{ rendered | to_nice_yaml }}"
+      vars:
+        rendered:
+          version: 2
+          ethernets: >-
+            {{ {guest_primary_interface:
+                  {'match': ({'macaddress': effective_primary_mac_address}
+                             if (primary_mac_address | default('') | string | length > 0)
+                             else {'name': guest_primary_interface}),
+                   'dhcp4': true, 'dhcp6': false},
+                guest_public_interface:
+                  {'match': {'macaddress': effective_mac_address},
+                   'set-name': guest_public_interface,
+                   'dhcp4': false, 'dhcp6': false,
+                   'addresses': [effective_public_ip ~ '/' ~ effective_prefix_length],
+                   'routes': ([{'to': '0.0.0.0/0', 'via': effective_gateway,
+                                'table': guest_route_table}]
+                              if (effective_gateway | length > 0) else []),
+                   'routing-policy': ([{'from': effective_public_ip,
+                                        'table': guest_route_table}]
+                                      if (effective_gateway | length > 0) else [])}} }}
+      when: >-
+        (public_ip | default('') | string | length > 0)
+        and (public_network_ref | default('') | string | length > 0)
+
+    - name: Build create-time network devices
+      ansible.builtin.set_fact:
+        vm_interfaces: >-
+          {{ [{'masquerade': {}, 'model': 'virtio', 'name': network_interface1_name}
+              | combine({'macAddress': effective_primary_mac_address}
+                        if (effective_primary_mac_address | length > 0) else {})]
+             + ([{'bridge': {}, 'model': 'virtio', 'name': public_interface_name,
+                  'macAddress': effective_mac_address}]
+                if (public_address_rendered | bool) else []) }}
+        vm_networks: >-
+          {{ [{'name': network_interface1_name, 'pod': {}}]
+             + ([{'name': public_interface_name,
+                  'multus': {'networkName': effective_public_network_ref}}]
+                if (public_address_rendered | bool) else []) }}
+
+    - name: Initialize create-time data volume definitions
+      ansible.builtin.set_fact:
+        data_volume_templates:
+          - kind: DataVolume
+            metadata:
+              name: "{{ vm_name }}"
+            spec:
+              source:
+                http:
+                  url: "{{ url }}"
+              storage:
+                resources:
+                  requests:
+                    storage: "{{ storage_size }}"
+        data_volume_disks:
+          - name: rootdisk
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+        data_volume_vm_volumes:
+          - name: rootdisk
+            dataVolume:
+              name: "{{ vm_name }}"
+          - name: cloudinitdisk
+            cloudInitNoCloud: >-
+              {{ {'userData': cloud_init_user_data}
+                 | combine({'networkData': public_network_data}
+                           if (public_address_rendered | bool) else {}) }}
+        published_data_volumes: []
+
+    - name: Build create-time data volume definitions
+      ansible.builtin.set_fact:
+        data_volume_templates: >-
+          {{ data_volume_templates
+             + ([{'kind': 'DataVolume',
+                  'metadata': {'name': vm_name ~ '-' ~ item.name},
+                  'spec': {'source': {'blank': {}},
+                           'storage': ({'resources': {'requests': {
+                             'storage': (item.size_gb | string) ~ 'Gi'}}}
+                             | combine({'storageClassName': item.storage_class}
+                               if (item.storage_class | default('') | string | length > 0)
+                               else {}))}}]
+                if (item.delete_on_termination | bool) else []) }}
+        data_volume_disks: >-
+          {{ data_volume_disks
+             + [{'name': item.name, 'disk': {'bus': 'virtio'}}] }}
+        data_volume_vm_volumes: >-
+          {{ data_volume_vm_volumes
+             + [{'name': item.name,
+                 'dataVolume': {'name': vm_name ~ '-' ~ item.name}}
+                if (item.delete_on_termination | bool)
+                else {'name': item.name,
+                      'persistentVolumeClaim': {
+                        'claimName': vm_name ~ '-' ~ item.name}}] }}
+        published_data_volumes: >-
+          {{ published_data_volumes
+             + [{'name': item.name,
+                 'volume_id': vm_name ~ '-' ~ item.name,
+                 'volume_project': vm_project,
+                 'device': '/dev/vd' ~ 'bcdefghijklmnopqrstuvwxyz'[data_volume_index],
+                 'delete_on_termination': item.delete_on_termination | bool}] }}
+      loop: "{{ requested_data_volumes }}"
+      loop_control:
+        index_var: data_volume_index
+        label: "{{ item.name }}"
+
+    - name: Create standalone persistent DataVolumes
+      kubernetes.core.k8s:
+        state: present
+        api_key: "{{ api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        definition:
+          apiVersion: cdi.kubevirt.io/v1beta1
+          kind: DataVolume
+          metadata:
+            name: "{{ vm_name }}-{{ item.name }}"
+            namespace: "{{ vm_project }}"
+          spec:
+            source:
+              blank: {}
+            # Nested `omit` would leak its placeholder into the manifest; add the class only when set.
+            storage: >-
+              {{ {'resources': {'requests': {'storage': (item.size_gb | string) ~ 'Gi'}}}
+                 | combine({'storageClassName': item.storage_class}
+                           if (item.storage_class | default('') | string | length > 0)
+                           else {}) }}
+      loop: "{{ requested_data_volumes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - existing_vm is not defined
+        - not (item.delete_on_termination | bool)
+
     - name: Create virtual machine
       redhat.openshift_virtualization.kubevirt_vm:
         name: "{{ vm_name }}"
@@ -100,23 +349,9 @@
         labels:
           app: "{{ vm_name }}"
           kubevirt.io/dynamic-credentials-support: 'true'
+          enicloud.io/operation-id: "{{ enicloud_operation_id }}"
 
-        data_volume_templates:
-          - kind: 'DataVolume'
-            metadata:
-              name: "{{ vm_name }}"
-            spec:
-              #sourceRef:
-              #  kind: 'DataSource'
-              #  name: "{{ os_images_template }}"
-              #  namespace: "{{ os_images_project }}"
-              source:
-                http:
-                  url: "{{ url }}"
-              storage:
-                resources:
-                  requests:
-                    storage: "{{ storage_size }}"
+        data_volume_templates: "{{ data_volume_templates }}"
 
         spec:
 #          accessCredentials:
@@ -132,34 +367,80 @@
               sockets: "{{ cpu_sockets }}"
               threads: "{{ cpu_threads }}"
             devices:
-              disks:
-                - disk:
-                    bus: 'virtio'
-                  name: 'rootdisk'
-                - disk:
-                    bus: 'virtio'
-                  name: 'cloudinitdisk'
-              interfaces:
-                - masquerade: {}
-                  model: 'virtio'
-                  name: "{{ network_interface1_name }}"
+              disks: "{{ data_volume_disks }}"
+              interfaces: "{{ vm_interfaces }}"
             memory:
               guest: "{{ memory_size }}"
-          networks:
-            - name: "{{ network_interface1_name }}"
-              pod: {}
-#            - name: "{{ network_interface2_name }}"
-#              multus:
-#                networkName: "{{ network_bridge_name }}"
+          networks: "{{ vm_networks }}"
           terminationGracePeriodSeconds: 180
-          volumes:
-            - dataVolume:
-                name: "{{ vm_name }}"
-              name: 'rootdisk'
-            - cloudInitNoCloud:
-                userData: "{{ cloud_init_user_data }}"
-              name: 'cloudinitdisk'
+          volumes: "{{ data_volume_vm_volumes }}"
       register: create_vm_result
+      when: existing_vm is not defined
+
+    - name: Resolve reused VirtualMachine result fields
+      ansible.builtin.set_fact:
+        existing_vm_name: "{{ existing_vm.metadata.name }}"
+        existing_vm_project: "{{ existing_vm.metadata.namespace }}"
+        existing_vm_status: >-
+          {{ existing_vm.status.printableStatus
+             | default('Running'
+                       if (existing_vm.spec.running | default(false, true) | bool)
+                       else 'Unknown', true) }}
+        existing_root_volume_name: >-
+          {{ (existing_vm.spec.template.spec.volumes | default([], true)
+              | selectattr('name', 'equalto', 'rootdisk')
+              | map(attribute='dataVolume.name') | first)
+             | default(existing_vm.metadata.name, true) }}
+        existing_root_volume_device: >-
+          {{ (existing_vm.spec.template.spec.volumes | default([], true)
+              | selectattr('name', 'equalto', 'rootdisk')
+              | map(attribute='name') | first)
+             | default('rootdisk', true) }}
+        existing_root_volume_source_url: >-
+          {{ (existing_vm.spec.dataVolumeTemplates | default([], true)
+              | map(attribute='spec.source.http.url') | first)
+             | default('', true) }}
+      when: existing_vm is defined
+
+    # `omit` only works on top-level module arguments; nested inside `set_stats.data` it would
+    # leak as a placeholder string into EniCloud. Absent public-address facts are therefore
+    # published as empty strings, which the client reads as "not set".
+    - name: Expose reused EniCloud VM create result
+      ansible.builtin.set_stats:
+        data:
+          resource_id: "{{ existing_vm_name }}"
+          vm_name: "{{ existing_vm_name }}"
+          vm_project: "{{ existing_vm_project }}"
+          namespace: "{{ existing_vm_project }}"
+          status: "{{ existing_vm_status }}"
+          root_volume_id: "{{ existing_root_volume_name }}"
+          root_volume_name: "{{ existing_root_volume_name }}"
+          root_volume_project: "{{ existing_vm_project }}"
+          root_volume_device: "{{ existing_root_volume_device }}"
+          data_volumes: "{{ published_data_volumes }}"
+          public_ip: "{{ effective_public_ip }}"
+          eni_result:
+            resource_id: "{{ existing_vm_name }}"
+            vm_name: "{{ existing_vm_name }}"
+            vm_project: "{{ existing_vm_project }}"
+            namespace: "{{ existing_vm_project }}"
+            status: "{{ existing_vm_status }}"
+            root_volume_id: "{{ existing_root_volume_name }}"
+            root_volume_name: "{{ existing_root_volume_name }}"
+            root_volume_project: "{{ existing_vm_project }}"
+            root_volume_device: "{{ existing_root_volume_device }}"
+            root_volume_source_url: "{{ existing_root_volume_source_url }}"
+            data_volumes: "{{ published_data_volumes }}"
+            public_ip: "{{ effective_public_ip }}"
+            prefix_length: "{{ effective_prefix_length }}"
+            gateway: "{{ effective_gateway }}"
+            guest_configuration: >-
+              {{ 'delivered_unconfirmed'
+                 if (public_address_rendered | bool) else 'not_required' }}
+            mac_address: "{{ effective_mac_address }}"
+            network_ref: "{{ effective_public_network_ref }}"
+            reused: true
+      when: existing_vm is defined
 
     - name: Expose EniCloud VM create result
       ansible.builtin.set_stats:
@@ -173,6 +454,8 @@
           root_volume_name: "{{ vm_name }}"
           root_volume_project: "{{ vm_project }}"
           root_volume_device: rootdisk
+          data_volumes: "{{ published_data_volumes }}"
+          public_ip: "{{ effective_public_ip }}"
           eni_result:
             resource_id: "{{ vm_name }}"
             vm_name: "{{ vm_name }}"
@@ -184,3 +467,14 @@
             root_volume_project: "{{ vm_project }}"
             root_volume_device: rootdisk
             root_volume_source_url: "{{ url }}"
+            data_volumes: "{{ published_data_volumes }}"
+            public_ip: "{{ effective_public_ip }}"
+            prefix_length: "{{ effective_prefix_length }}"
+            gateway: "{{ effective_gateway }}"
+            guest_configuration: >-
+              {{ 'delivered_unconfirmed'
+                 if (public_address_rendered | bool) else 'not_required' }}
+            mac_address: "{{ effective_mac_address }}"
+            network_ref: "{{ effective_public_network_ref }}"
+            reused: false
+      when: existing_vm is not defined

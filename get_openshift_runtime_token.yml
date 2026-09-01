@@ -7,6 +7,10 @@
     validate_certs: false
     token_duration_seconds: 600
     runtime_service_account: "{{ console_service_account | default('enicloud', true) }}"
+    # The account that mints the token need not live in the VM's namespace. Defaulting to
+    # vm_project keeps the historical behaviour; setting console_service_account_namespace
+    # lets one central account serve every tenant namespace.
+    runtime_service_account_namespace: "{{ console_service_account_namespace | default(vm_project, true) }}"
     effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
     effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
 
@@ -24,6 +28,8 @@
           - vm_project | length > 0
           - runtime_service_account is defined
           - runtime_service_account | length > 0
+          - runtime_service_account_namespace is defined
+          - runtime_service_account_namespace | length > 0
         fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, vm_name, vm_project, runtime_service_account"
 
     - name: Read VM instance details
@@ -45,7 +51,7 @@
 
     - name: Request short-lived service account token
       ansible.builtin.uri:
-        url: "{{ effective_host | regex_replace('/+$', '') }}/api/v1/namespaces/{{ vm_project }}/serviceaccounts/{{ runtime_service_account }}/token"
+        url: "{{ effective_host | regex_replace('/+$', '') }}/api/v1/namespaces/{{ runtime_service_account_namespace }}/serviceaccounts/{{ runtime_service_account }}/token"
         method: POST
         headers:
           Authorization: "Bearer {{ effective_api_key }}"
@@ -71,6 +77,7 @@
       ansible.builtin.set_stats:
         data:
           api_host: "{{ effective_host }}"
+          resource_id: "{{ vm_name }}"
           namespace: "{{ vm_project }}"
           vmi_name: "{{ vm_name }}"
           token: "{{ token_request.json.status.token }}"
@@ -87,6 +94,7 @@
             expires_at: "{{ token_request.json.status.expirationTimestamp | default('') }}"
             verify_tls: "{{ validate_certs }}"
             runtime_service_account: "{{ runtime_service_account }}"
+            runtime_service_account_namespace: "{{ runtime_service_account_namespace }}"
             supported_uses:
               - console_vnc
               - metrics

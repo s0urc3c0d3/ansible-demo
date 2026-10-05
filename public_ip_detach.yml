@@ -36,7 +36,7 @@
     effective_vm_name: >-
       {{ vm_name | default(resource_id | default(name | default('', true), true), true) }}
     effective_vm_project: >-
-      {{ vm_project | default(project | default(namespace | default('', true), true), true) }}
+      {{ vm_project | default(project | default(lookup('ansible.builtin.vars', 'namespace', default=''), true), true) }}
     effective_interface_name: >-
       {{ interface_name | default(vm_del_net | default('enicloud-public', true), true) }}
     effective_public_ip: >-

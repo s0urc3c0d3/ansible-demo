@@ -1,9 +1,9 @@
-- name: List DataVolume on OpenShift Virtualization
+- name: List OpenShift Virtualization VM snapshots across namespaces
   hosts: localhost
   #hosts: openshift
   connection: local
   gather_facts: false
- 
+
 
   tasks:
 

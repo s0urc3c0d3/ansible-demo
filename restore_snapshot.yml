@@ -1,4 +1,4 @@
-- name: Create a snapshot on OpenShift Virtualization
+- name: Restore OpenShift Virtualization VM snapshot
   hosts: localhost
   #hosts: openshift
   connection: local
@@ -9,13 +9,13 @@
     #vm_name: my-test-vm
     #vm_project: default
     #snapshot_name: snap1
-    
+
     # API access
     #api_key: "{{ lookup('env', 'OPENSHIFT_API_KEY') }}"
     validate_certs: false
 
   tasks:
-  - name: restore snapshot
+  - name: Restore snapshot
     kubernetes.core.k8s:
       state: present
       definition:
@@ -30,3 +30,24 @@
             kind: VirtualMachine
             name: "{{ vm_name }}"
           virtualMachineSnapshotName: "{{ snapshot_name }}"
+
+  - name: Expose EniCloud snapshot restore result
+    ansible.builtin.set_stats:
+      data:
+        resource_id: "{{ vm_name }}"
+        vm_name: "{{ vm_name }}"
+        vm_project: "{{ vm_project }}"
+        namespace: "{{ vm_project }}"
+        snapshot_id: "{{ snapshot_name }}"
+        snapshot_name: "{{ snapshot_name }}"
+        snapshot_restore_name: "{{ snapshot_restore_name }}"
+        status: Running
+        eni_result:
+          resource_id: "{{ vm_name }}"
+          vm_name: "{{ vm_name }}"
+          vm_project: "{{ vm_project }}"
+          namespace: "{{ vm_project }}"
+          snapshot_id: "{{ snapshot_name }}"
+          snapshot_name: "{{ snapshot_name }}"
+          snapshot_restore_name: "{{ snapshot_restore_name }}"
+          status: Running

@@ -1,4 +1,4 @@
-- name: List DataVolume on OpenShift Virtualization
+- name: List OpenShift Virtualization VM snapshot details
   hosts: localhost
   #hosts: openshift
   connection: local

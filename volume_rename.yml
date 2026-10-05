@@ -10,7 +10,7 @@
     effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
     effective_volume_id: "{{ volume_id | default(resource_id, true) }}"
     effective_volume_name: "{{ volume_name | default(name, true) }}"
-    effective_volume_project: "{{ volume_project | default(vm_project, true) | default(project, true) | default(namespace, true) }}"
+    effective_volume_project: "{{ volume_project | default(vm_project, true) | default(project, true) | default(lookup('ansible.builtin.vars', 'namespace', default=''), true) }}"
 
   tasks:
     - name: Validate volume rename inputs
@@ -95,10 +95,12 @@
     - name: Expose EniCloud volume rename result
       ansible.builtin.set_stats:
         data:
+          resource_id: "{{ effective_volume_id }}"
           volume_id: "{{ effective_volume_id }}"
           volume_name: "{{ effective_volume_name }}"
           volume_project: "{{ effective_volume_project }}"
           eni_result:
+            resource_id: "{{ effective_volume_id }}"
             volume_id: "{{ effective_volume_id }}"
             volume_name: "{{ effective_volume_name }}"
             volume_project: "{{ effective_volume_project }}"

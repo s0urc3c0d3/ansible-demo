@@ -7,6 +7,21 @@
     vm_project: default
 
   tasks:
+  - name: List namespaces for VirtualMachine discovery coverage
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Namespace
+      api_key: "{{ api_key }}"
+    register: vm_discovery_namespaces
+
+  # Included tasks emit normal runner_on_ok events with per-namespace invocation
+  # evidence, including empty namespaces; an aggregate loop result is insufficient.
+  - name: List all VirtualMachines in each scanned namespace
+    ansible.builtin.include_tasks: tasks/list_vm_namespace.yml
+    loop: "{{ vm_discovery_namespaces.resources }}"
+    loop_control:
+      loop_var: vm_discovery_namespace
+
   - name: Get a list of all VirtualMachines
     redhat.openshift_virtualization.kubevirt_vmi_info:
       api_key: "{{ api_key }}"

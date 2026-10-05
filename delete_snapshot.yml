@@ -1,6 +1,6 @@
-- connection: local
-  hosts: openshift
+- name: Delete OpenShift Virtualization VM snapshot
   hosts: localhost
+  connection: local
   gather_facts: false
 
   vars:
@@ -19,3 +19,20 @@
         metadata:
           name: "{{ snapshot_name }}"
           namespace: "{{ vm_project }}"
+
+  - name: Expose EniCloud snapshot delete result
+    ansible.builtin.set_stats:
+      data:
+        resource_id: "{{ snapshot_name }}"
+        snapshot_id: "{{ snapshot_name }}"
+        snapshot_name: "{{ snapshot_name }}"
+        vm_project: "{{ vm_project }}"
+        namespace: "{{ vm_project }}"
+        status: deleted
+        eni_result:
+          resource_id: "{{ snapshot_name }}"
+          snapshot_id: "{{ snapshot_name }}"
+          snapshot_name: "{{ snapshot_name }}"
+          vm_project: "{{ vm_project }}"
+          namespace: "{{ vm_project }}"
+          status: deleted

@@ -70,9 +70,19 @@
     - name: Publish DataVolume output
       ansible.builtin.set_stats:
         data:
+          resource_id: "{{ volume_name }}"
           volume_id: "{{ volume_name }}"
           volume_name: "{{ volume_name }}"
           volume_project: "{{ volume_project }}"
           storage_class: "{{ datavolume_storage_class }}"
           access_mode: "{{ datavolume_access_mode }}"
           volume_mode: "{{ datavolume_volume_mode }}"
+          eni_result:
+            resource_id: "{{ volume_name }}"
+            volume_id: "{{ volume_name }}"
+            volume_name: "{{ volume_name }}"
+            volume_project: "{{ volume_project }}"
+            storage_class: "{{ datavolume_storage_class }}"
+            access_mode: "{{ datavolume_access_mode }}"
+            volume_mode: "{{ datavolume_volume_mode }}"
+            status: created

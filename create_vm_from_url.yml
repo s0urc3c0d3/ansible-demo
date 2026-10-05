@@ -56,7 +56,16 @@
         updates:
           network:
             when: [boot]
-    base_cloud_init_user_data: "{{ user_data | default(default_cloud_init_user_data, true) }}"
+    # Contract v2: legacy cloud_init_user_data is INPUT only. Extra vars override
+    # set_fact, so the composed Secret document must use a distinct output name.
+    base_cloud_init_user_data: >-
+      {{ user_data
+         | default(cloud_init_user_data | default(default_cloud_init_user_data, true), true) }}
+    enicloud_guest_address_announcement_file:
+      path: /var/lib/cloud/scripts/per-boot/enicloud-address-announcement
+      permissions: '0755'
+      owner: root:root
+      content: "{{ enicloud_guest_address_announcement_script | default('', true) }}"
 
     # API access
     #api_key: "{{ lookup('env', 'OPENSHIFT_API_KEY') }}"
@@ -156,38 +165,59 @@
     # optimisation, and the attach path degrades honestly to manual_required without it.
     - name: Add the network-reapply drop-in to cloud-init user data
       block:
-        - name: Merge the drop-in into the operator's cloud-config
+        - name: Validate the base cloud-config for file composition
+          ansible.builtin.assert:
+            that:
+              - base_cloud_init_user_data is match('^\s*#cloud-config(?:\s|$)')
+              - parsed is mapping
+              - (parsed.write_files | default([]) | type_debug) == 'list'
+              - >-
+                (parsed.write_files | default([]) | select('mapping') | list | length)
+                == (parsed.write_files | default([]) | length)
+            fail_msg: Cloud-init user data cannot be composed; preserving the original input.
+
+        - name: Merge the drop-in and optional announcement into the operator's cloud-config
           ansible.builtin.set_fact:
-            cloud_init_user_data: >-
+            enicloud_composed_user_data: >-
               {{ '#cloud-config' ~ newline
-                 ~ (parsed | combine({'write_files':
-                      (parsed.write_files | default([])) + [enicloud_network_reapply_file]})
+                 ~ (parsed | combine({'write_files': announcement_files})
                     | to_nice_yaml) }}
-          vars:
-            # A real newline carried in from YAML rather than `'\n'` written inside the
-            # expression. Measured on LAB: the merged document came out with the header and
-            # the first key on ONE line -- `#cloud-config\nchpasswd:` with a literal
-            # backslash -- and cloud-init identifies a document by its FIRST LINE, so it
-            # recognised nothing and discarded the entire user-data. The machine then had no
-            # password (console login refused) and no `99-enicloud-network.cfg` drop-in, and
-            # without that drop-in a public address never survives a reboot, because KubeVirt
-            # derives the NoCloud instance-id from the firmware UUID and cloud-init treats
-            # the restarted machine as the same instance. Double-quoted YAML is the one form
-            # that is guaranteed to yield the newline itself instead of two characters.
-            newline: "\n"
-            parsed: >-
-              {{ base_cloud_init_user_data
-                 | regex_replace('^\\s*#cloud-config\\s*', '') | from_yaml }}
-          when: "'99-enicloud-network.cfg' not in base_cloud_init_user_data"
+            enicloud_guest_address_announcement_status: >-
+              {{ 'installed' if (announcement_requested | bool) else 'not_requested' }}
       rescue:
         - name: Keep the operator's cloud-config untouched when it cannot be parsed
           ansible.builtin.set_fact:
-            cloud_init_user_data: "{{ base_cloud_init_user_data }}"
-
-    - name: Default cloud-init user data when the drop-in was skipped
-      ansible.builtin.set_fact:
-        cloud_init_user_data: "{{ base_cloud_init_user_data }}"
-      when: cloud_init_user_data is not defined
+            enicloud_composed_user_data: "{{ base_cloud_init_user_data }}"
+            enicloud_guest_address_announcement_status: >-
+              {{ 'unsupported_user_data'
+                 if (announcement_requested | bool) else 'not_requested' }}
+      vars:
+        # A real newline carried in from YAML rather than `'\n'` written inside the
+        # expression. Measured on LAB: the merged document came out with the header and
+        # the first key on ONE line -- `#cloud-config\nchpasswd:` with a literal
+        # backslash -- and cloud-init identifies a document by its FIRST LINE, so it
+        # recognised nothing and discarded the entire user-data. The machine then had no
+        # password (console login refused) and no `99-enicloud-network.cfg` drop-in, and
+        # without that drop-in a public address never survives a reboot, because KubeVirt
+        # derives the NoCloud instance-id from the firmware UUID and cloud-init treats
+        # the restarted machine as the same instance. Double-quoted YAML is the one form
+        # that is guaranteed to yield the newline itself instead of two characters.
+        newline: "\n"
+        loaded_cloud_config: >-
+          {{ base_cloud_init_user_data
+             | regex_replace('^\\s*#cloud-config\\s*', '') | from_yaml }}
+        parsed: "{{ {} if loaded_cloud_config is none else loaded_cloud_config }}"
+        announcement_requested: >-
+          {{ enicloud_guest_address_announcement_script | default('', true) | length > 0 }}
+        network_files: >-
+          {{ (parsed.write_files | default([]))
+             + ([enicloud_network_reapply_file]
+                if ('99-enicloud-network.cfg' not in base_cloud_init_user_data) else []) }}
+        announcement_files: >-
+          {{ ((network_files
+               | rejectattr('path', 'equalto', enicloud_guest_address_announcement_file.path)
+               | list) + [enicloud_guest_address_announcement_file])
+             if (announcement_requested | bool) else network_files }}
 
     # Rendered only when this run has both an address and a network reference. The
     # document matches the public NIC on its MAC rather than on interface order. The
@@ -256,22 +286,22 @@
                 resources:
                   requests:
                     storage: "{{ storage_size }}"
+        # The cloud-init disk is appended AFTER the data volumes (next task): KubeVirt hands out
+        # /dev/vdX in `disks` order, and the device published below assumes the first data
+        # volume is /dev/vdb. Declared before them it took /dev/vdb itself (measured on LAB).
         data_volume_disks:
           - name: rootdisk
-            disk:
-              bus: virtio
-          - name: cloudinitdisk
             disk:
               bus: virtio
         data_volume_vm_volumes:
           - name: rootdisk
             dataVolume:
               name: "{{ vm_name }}"
+          # Referenced, not inline: KubeVirt rejects inline user data above 2048 bytes.
           - name: cloudinitdisk
-            cloudInitNoCloud: >-
-              {{ {'userData': cloud_init_user_data}
-                 | combine({'networkData': public_network_data}
-                           if (public_address_rendered | bool) else {}) }}
+            cloudInitNoCloud:
+              secretRef:
+                name: "cloudinit-{{ vm_name }}"
         published_data_volumes: []
 
     - name: Build create-time data volume definitions
@@ -310,6 +340,11 @@
         index_var: data_volume_index
         label: "{{ item.name }}"
 
+    - name: Append the cloud-init disk after the data volumes
+      ansible.builtin.set_fact:
+        data_volume_disks: >-
+          {{ data_volume_disks + [{'name': 'cloudinitdisk', 'disk': {'bus': 'virtio'}}] }}
+
     - name: Create standalone persistent DataVolumes
       kubernetes.core.k8s:
         state: present
@@ -336,6 +371,30 @@
       when:
         - existing_vm is not defined
         - not (item.delete_on_termination | bool)
+
+    # The EniCloud user data (SSH keys, metrics bootstrap, network drop-in) exceeds the
+    # 2048-byte inline limit of cloudInitNoCloud, so it travels in a Secret, as in the direct
+    # OpenShift provider. KubeVirt reads `userdata` and `networkdata` from it.
+    - name: Create the cloud-init secret
+      kubernetes.core.k8s:
+        state: present
+        api_key: "{{ api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata:
+            name: "cloudinit-{{ vm_name }}"
+            namespace: "{{ vm_project }}"
+            labels:
+              app: "{{ vm_name }}"
+              enicloud.io/operation-id: "{{ enicloud_operation_id }}"
+          stringData: >-
+            {{ {'userdata': enicloud_composed_user_data}
+               | combine({'networkdata': public_network_data}
+                         if (public_address_rendered | bool) else {}) }}
+      when: existing_vm is not defined
 
     - name: Create virtual machine
       redhat.openshift_virtualization.kubevirt_vm:
@@ -419,6 +478,8 @@
           root_volume_device: "{{ existing_root_volume_device }}"
           data_volumes: "{{ published_data_volumes }}"
           public_ip: "{{ effective_public_ip }}"
+          playbook_contract_version: 2
+          guest_address_announcement: not_requested
           eni_result:
             resource_id: "{{ existing_vm_name }}"
             vm_name: "{{ existing_vm_name }}"
@@ -439,6 +500,8 @@
                  if (public_address_rendered | bool) else 'not_required' }}
             mac_address: "{{ effective_mac_address }}"
             network_ref: "{{ effective_public_network_ref }}"
+            playbook_contract_version: 2
+            guest_address_announcement: not_requested
             reused: true
       when: existing_vm is defined
 
@@ -456,6 +519,8 @@
           root_volume_device: rootdisk
           data_volumes: "{{ published_data_volumes }}"
           public_ip: "{{ effective_public_ip }}"
+          playbook_contract_version: 2
+          guest_address_announcement: "{{ enicloud_guest_address_announcement_status }}"
           eni_result:
             resource_id: "{{ vm_name }}"
             vm_name: "{{ vm_name }}"
@@ -476,5 +541,7 @@
                  if (public_address_rendered | bool) else 'not_required' }}
             mac_address: "{{ effective_mac_address }}"
             network_ref: "{{ effective_public_network_ref }}"
+            playbook_contract_version: 2
+            guest_address_announcement: "{{ enicloud_guest_address_announcement_status }}"
             reused: false
       when: existing_vm is not defined

@@ -48,7 +48,7 @@
     effective_vm_name: >-
       {{ vm_name | default(resource_id | default(name | default('', true), true), true) }}
     effective_vm_project: >-
-      {{ vm_project | default(project | default(namespace | default('', true), true), true) }}
+      {{ vm_project | default(project | default(lookup('ansible.builtin.vars', 'namespace', default=''), true), true) }}
     effective_network_ref: >-
       {{ public_network_ref | default(network_ref | default(vm_new_net
          | default(network_name | default('', true), true), true), true) }}

@@ -1,4 +1,4 @@
-- name: Create a VM on OpenShift Virtualization
+- name: Delete a VM on OpenShift Virtualization
   hosts: localhost
   #hosts: openshift
   connection: local
@@ -9,12 +9,53 @@
     #vm_name: my-test-vm
     #vm_project: default
     validate_certs: false
+    effective_host: "{{ host | default(lookup('env', 'K8S_AUTH_HOST'), true) | default(lookup('env', 'OPENSHIFT_HOST'), true) | default(lookup('env', 'OPENSHIFT_API_HOST'), true) }}"
+    effective_api_key: "{{ api_key | default(lookup('env', 'K8S_AUTH_API_KEY'), true) | default(lookup('env', 'OPENSHIFT_API_KEY'), true) }}"
+    effective_vm_name: >-
+      {{ vm_name | default(resource_id | default(name | default('', true), true), true) }}
+    effective_vm_project: >-
+      {{ vm_project | default(project | default(lookup('ansible.builtin.vars', 'namespace', default=''), true), true) }}
 
   tasks:
-    - name: Create virtual machine
+    - name: Validate delete inputs
+      ansible.builtin.assert:
+        that:
+          - effective_host | length > 0
+          - effective_api_key | length > 0
+          - effective_vm_name | length > 0
+          - effective_vm_project | length > 0
+        fail_msg: "Required vars: host/api_key or AAP Kubernetes credential env, vm_name/resource_id, vm_project/project/namespace."
+
+    - name: Delete virtual machine
       redhat.openshift_virtualization.kubevirt_vm:
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        api_key: "{{ api_key }}"
+        host: "{{ effective_host }}"
+        name: "{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+        api_key: "{{ effective_api_key }}"
         validate_certs: "{{ validate_certs }}"
         state: absent
+
+    - name: Delete the cloud-init secret
+      kubernetes.core.k8s:
+        host: "{{ effective_host }}"
+        api_key: "{{ effective_api_key }}"
+        validate_certs: "{{ validate_certs }}"
+        state: absent
+        kind: Secret
+        name: "cloudinit-{{ effective_vm_name }}"
+        namespace: "{{ effective_vm_project }}"
+
+    - name: Expose EniCloud VM delete result
+      ansible.builtin.set_stats:
+        data:
+          resource_id: "{{ effective_vm_name }}"
+          vm_name: "{{ effective_vm_name }}"
+          vm_project: "{{ effective_vm_project }}"
+          namespace: "{{ effective_vm_project }}"
+          status: deleted
+          eni_result:
+            resource_id: "{{ effective_vm_name }}"
+            vm_name: "{{ effective_vm_name }}"
+            vm_project: "{{ effective_vm_project }}"
+            namespace: "{{ effective_vm_project }}"
+            status: deleted

@@ -1,4 +1,4 @@
-- name: Create a VM on OpenShift Virtualization
+- name: Create OpenShift Virtualization VM snapshot
   hosts: localhost
   #hosts: openshift
   connection: local
@@ -9,7 +9,7 @@
     #vm_name: my-test-vm
     #vm_project: default
     #snapshot_name: snap1
-    
+
     # API access
     #api_key: "{{ lookup('env', 'OPENSHIFT_API_KEY') }}"
     validate_certs: false
@@ -32,3 +32,23 @@
             apiGroup: kubevirt.io
             kind: VirtualMachine
             name: "{{ vm_name }}"
+
+  - name: Expose EniCloud snapshot create result
+    ansible.builtin.set_stats:
+      data:
+        resource_id: "{{ snapshot_name }}"
+        snapshot_id: "{{ snapshot_name }}"
+        snapshot_name: "{{ snapshot_name }}"
+        vm_name: "{{ vm_name }}"
+        vm_project: "{{ vm_project }}"
+        namespace: "{{ vm_project }}"
+        status: created
+        eni_result:
+          resource_id: "{{ snapshot_name }}"
+          snapshot_id: "{{ snapshot_name }}"
+          snapshot_name: "{{ snapshot_name }}"
+          vm_resource_id: "{{ vm_name }}"
+          vm_name: "{{ vm_name }}"
+          vm_project: "{{ vm_project }}"
+          namespace: "{{ vm_project }}"
+          status: created

@@ -8,6 +8,13 @@
     details: false
 
   tasks:
+  - name: List all VirtualMachines for namespace discovery coverage
+    kubernetes.core.k8s_info:
+      api_version: kubevirt.io/v1
+      kind: VirtualMachine
+      namespace: "{{ vm_project }}"
+      api_key: "{{ api_key }}"
+
   - name: Get a list of all VirtualMachines
     redhat.openshift_virtualization.kubevirt_vmi_info:
       namespace: "{{ vm_project }}"
